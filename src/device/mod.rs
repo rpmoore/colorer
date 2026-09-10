@@ -104,6 +104,15 @@ pub trait DeviceBackend {
     fn discover(&self) -> Result<Vec<DeviceInfo>, DeviceError>;
 }
 
+/// Capability to write a color to one identified device. Implemented per
+/// backend (HID in this section; sysfs is section-06) since not every
+/// `DeviceBackend` supports writes, and each backend's write path has
+/// different privilege/protocol requirements than its (always-unprivileged)
+/// discovery path.
+pub trait ColorWriter {
+    fn set_color(&self, id: &str, color: crate::color::Rgb) -> Result<(), DeviceError>;
+}
+
 /// FNV-1a: a small, well-documented, deterministic-across-Rust-versions hash.
 /// Used instead of `std::collections::hash_map::DefaultHasher`, whose algorithm
 /// the stdlib explicitly does not guarantee stable across Rust releases — a

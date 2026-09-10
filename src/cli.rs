@@ -16,6 +16,8 @@ pub enum Commands {
     List(ListArgs),
     /// Show full detail for a single discovered device.
     Show(ShowArgs),
+    /// Set the color of a single discovered device.
+    Set(SetArgs),
 }
 
 #[derive(Args, Debug, Default)]
@@ -29,6 +31,14 @@ pub struct ListArgs {
 pub struct ShowArgs {
     /// The device id, as printed by `colorer list`.
     pub id: String,
+}
+
+#[derive(Args, Debug)]
+pub struct SetArgs {
+    /// The device id, as printed by `colorer list`.
+    pub id: String,
+    /// The color to set, as "#RRGGBB" or "RRGGBB".
+    pub color: String,
 }
 
 #[cfg(test)]
@@ -88,5 +98,27 @@ mod tests {
     #[test]
     fn show_missing_id_is_error() {
         assert!(Cli::try_parse_from(["colorer", "show"]).is_err());
+    }
+
+    #[test]
+    fn set_subcommand_parses() {
+        let cli = Cli::try_parse_from(["colorer", "set", "hid-deadbeef", "ff0000"]).unwrap();
+        match cli.command {
+            Commands::Set(args) => {
+                assert_eq!(args.id, "hid-deadbeef");
+                assert_eq!(args.color, "ff0000");
+            }
+            _ => panic!("expected Commands::Set"),
+        }
+    }
+
+    #[test]
+    fn set_missing_color_is_error() {
+        assert!(Cli::try_parse_from(["colorer", "set", "hid-deadbeef"]).is_err());
+    }
+
+    #[test]
+    fn set_missing_id_and_color_is_error() {
+        assert!(Cli::try_parse_from(["colorer", "set"]).is_err());
     }
 }
