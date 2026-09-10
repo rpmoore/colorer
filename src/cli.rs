@@ -16,9 +16,12 @@ pub enum Commands {
     List(ListArgs),
 }
 
-// Empty for M0; `--all` is added in section-02 (M1).
-#[derive(Args, Debug)]
-pub struct ListArgs {}
+#[derive(Args, Debug, Default)]
+pub struct ListArgs {
+    /// Show every discovered HID device, not just known-RGB-vendor matches.
+    #[arg(long)]
+    pub all: bool,
+}
 
 #[cfg(test)]
 mod tests {
@@ -46,7 +49,15 @@ mod tests {
     fn list_subcommand_parses() {
         let cli = Cli::try_parse_from(["colorer", "list"]).unwrap();
         match cli.command {
-            Commands::List(_) => {}
+            Commands::List(args) => assert!(!args.all),
+        }
+    }
+
+    #[test]
+    fn list_subcommand_parses_all_flag() {
+        let cli = Cli::try_parse_from(["colorer", "list", "--all"]).unwrap();
+        match cli.command {
+            Commands::List(args) => assert!(args.all),
         }
     }
 

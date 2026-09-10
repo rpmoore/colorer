@@ -6,3 +6,8 @@ description = "CLI to discover and control RGB-capable hardware on Linux via nat
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+# linux-native-basic-udev: pure-Rust sysfs-based enumeration, no libudev.so/
+# pkg-config system dependency (the plan's default "linux-static-hidraw"
+# backend needs libudev-dev, unavailable in the build environment). Also
+# keeps "native device access, no external app" closer to the spec's intent.
+hidapi = { version = "2", default-features = false, features = ["linux-native-basic-udev"] }

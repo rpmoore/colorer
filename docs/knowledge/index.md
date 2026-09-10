@@ -13,3 +13,4 @@ OKF-conformant documentation of `colorer`'s *current, implemented* behavior — 
 ## Areas
 
 - [CLI](cli/index.md) — command-line parsing and dispatch
+- [Device](device/index.md) — device discovery backends, identity, and errors
