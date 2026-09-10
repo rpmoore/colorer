@@ -10,7 +10,7 @@ tags: [device, testability]
 
 `src/device/mod.rs:66-69` defines `DeviceBackend`, the trait every discovery source (currently `HidBackend`, `src/device/hid.rs`) implements. `discover()` must not require elevated privileges — enumeration always works unprivileged; only later `set` operations need permission handling.
 
-`src/commands/list.rs:29-38` is the only place vendor-allowlist filtering happens. Backends always return everything they see, unfiltered (`src/device/hid.rs` doc comment) — this keeps `--all` from needing a second discovery path and keeps the trait's contract identical across backends (sysfs entries, added in section-03, have no vendor id and are never filtered).
+`src/commands/list.rs:48-56` is the only place vendor-allowlist filtering happens. Backends always return everything they see, unfiltered (`src/device/hid.rs` doc comment) — this keeps `--all` from needing a second discovery path and keeps the trait's contract identical across backends (sysfs entries, added in section-03, have no vendor id and are never filtered).
 
 ## Id scheme
 

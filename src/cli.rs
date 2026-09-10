@@ -14,6 +14,8 @@ pub struct Cli {
 pub enum Commands {
     /// List discovered RGB-capable devices.
     List(ListArgs),
+    /// Show full detail for a single discovered device.
+    Show(ShowArgs),
 }
 
 #[derive(Args, Debug, Default)]
@@ -21,6 +23,12 @@ pub struct ListArgs {
     /// Show every discovered HID device, not just known-RGB-vendor matches.
     #[arg(long)]
     pub all: bool,
+}
+
+#[derive(Args, Debug)]
+pub struct ShowArgs {
+    /// The device id, as printed by `colorer list`.
+    pub id: String,
 }
 
 #[cfg(test)]
@@ -50,6 +58,7 @@ mod tests {
         let cli = Cli::try_parse_from(["colorer", "list"]).unwrap();
         match cli.command {
             Commands::List(args) => assert!(!args.all),
+            _ => panic!("expected Commands::List"),
         }
     }
 
@@ -58,11 +67,26 @@ mod tests {
         let cli = Cli::try_parse_from(["colorer", "list", "--all"]).unwrap();
         match cli.command {
             Commands::List(args) => assert!(args.all),
+            _ => panic!("expected Commands::List"),
         }
     }
 
     #[test]
     fn missing_subcommand_is_error() {
         assert!(Cli::try_parse_from(["colorer"]).is_err());
+    }
+
+    #[test]
+    fn show_subcommand_parses() {
+        let cli = Cli::try_parse_from(["colorer", "show", "hid-deadbeef"]).unwrap();
+        match cli.command {
+            Commands::Show(args) => assert_eq!(args.id, "hid-deadbeef"),
+            _ => panic!("expected Commands::Show"),
+        }
+    }
+
+    #[test]
+    fn show_missing_id_is_error() {
+        assert!(Cli::try_parse_from(["colorer", "show"]).is_err());
     }
 }

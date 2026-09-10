@@ -1,5 +1,5 @@
 use crate::device::vendors::known_vendor;
-use crate::device::{DeviceBackend, DeviceCapability, DeviceError, DeviceInfo, DeviceSource};
+use crate::device::{DeviceBackend, DeviceError, DeviceInfo, DeviceSource};
 
 const EMPTY_MESSAGE: &str = "no known RGB devices found (try --all)";
 
@@ -65,15 +65,9 @@ fn format_table(devices: &[&DeviceInfo]) -> String {
         let vendor = d.vendor_id.and_then(known_vendor).unwrap_or("");
         let vendor_id = d.vendor_id.map(|v| format!("{v:04x}")).unwrap_or_default();
         let product_id = d.product_id.map(|v| format!("{v:04x}")).unwrap_or_default();
-        let capability = match d.capability {
-            DeviceCapability::Unknown => "unknown",
-            DeviceCapability::SingleColor => "single-color",
-            DeviceCapability::MultiColor => "multi-color",
-            DeviceCapability::VendorColor => "vendor-color",
-        };
         out.push_str(&format!(
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-            d.id, source, vendor, d.label, d.path, vendor_id, product_id, capability
+            d.id, source, vendor, d.label, d.path, vendor_id, product_id, d.capability
         ));
     }
     out
@@ -106,7 +100,7 @@ impl DeviceBackend for FailingBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::device::make_id;
+    use crate::device::{DeviceCapability, make_id};
 
     fn hid_device(label: &str, path: &str, vendor_id: u16) -> DeviceInfo {
         DeviceInfo {

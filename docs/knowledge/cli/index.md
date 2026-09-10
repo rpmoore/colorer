@@ -9,3 +9,4 @@ tags: [cli]
 # CLI
 
 - [Parsing boundary](parsing-boundary.md) — why `cli.rs` never touches devices/I/O
+- [Show command](show-command.md) — `show <id>`'s fresh-discovery lookup, partial-failure handling, and sysfs current-state reads

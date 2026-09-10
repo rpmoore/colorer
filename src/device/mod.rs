@@ -67,6 +67,18 @@ pub enum DeviceError {
     Unsupported { id: String, operation: &'static str },
 }
 
+impl fmt::Display for DeviceCapability {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            DeviceCapability::Unknown => "unknown",
+            DeviceCapability::SingleColor => "single-color",
+            DeviceCapability::MultiColor => "multi-color",
+            DeviceCapability::VendorColor => "vendor-color",
+        };
+        write!(f, "{s}")
+    }
+}
+
 impl fmt::Display for DeviceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
