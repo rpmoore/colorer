@@ -13,16 +13,20 @@ use device::DeviceBackend;
 use device::hid::HidBackend;
 use device::sysfs::SysfsBackend;
 
+const SYSFS_LEDS_ROOT: &str = "/sys/class/leds";
+
 fn backends() -> Vec<Box<dyn DeviceBackend>> {
     vec![
         Box::new(HidBackend::new()),
-        Box::new(SysfsBackend::new("/sys/class/leds")),
+        Box::new(SysfsBackend::new(SYSFS_LEDS_ROOT)),
     ]
 }
 
-// sysfs write support lands in section-06; HID is the only writer for now.
 fn color_writers() -> Vec<Box<dyn ColorWriter>> {
-    vec![Box::new(HidBackend::new())]
+    vec![
+        Box::new(HidBackend::new()),
+        Box::new(SysfsBackend::new(SYSFS_LEDS_ROOT)),
+    ]
 }
 
 fn main() {
