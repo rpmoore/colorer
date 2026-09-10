@@ -68,8 +68,16 @@ impl DeviceBackend for HidBackend {
 /// Abstracts the raw HID write so it can be faked in tests without a real
 /// device handle. Only used within this module (production `RealHidTransport`
 /// plus test fakes) — not part of the crate's public API.
+///
+/// Two write paths exist because devices disagree on which one their color
+/// protocol uses: `write_report` is a plain interrupt OUT report;
+/// `write_feature_report` is a control-transfer Feature report (`HIDIOCSFEATURE`)
+/// — e.g. Razer's Chroma protocol (see `razer_ornata_v3_static_report`) requires
+/// the latter. `ReportKind` on each `IMPLEMENTED_PROTOCOLS` entry picks which one
+/// `set_color_impl` calls for that device.
 trait HidTransport {
     fn write_report(&self, report: &[u8]) -> Result<(), DeviceError>;
+    fn write_feature_report(&self, report: &[u8]) -> Result<(), DeviceError>;
 }
 
 /// Wraps an already-opened `hidapi::HidDevice`. Production-only; never
@@ -82,6 +90,10 @@ impl HidTransport for RealHidTransport {
             .write(report)
             .map(|_written| ())
             .map_err(map_hid_error)
+    }
+
+    fn write_feature_report(&self, report: &[u8]) -> Result<(), DeviceError> {
+        self.0.send_feature_report(report).map_err(map_hid_error)
     }
 }
 
@@ -104,20 +116,122 @@ fn map_hid_error(err: HidError) -> DeviceError {
 /// without capturing state.
 type ReportBuilder = fn(&Rgb) -> Vec<u8>;
 
-/// Devices this backend has an actually-implemented, working color protocol
-/// for, keyed by (vendor_id, product_id). Empty: no real target device has
-/// been identified and reverse-engineered yet (see section-05's precondition
-/// in docs/plans/sections/section-05-set-hid.md). Being in `vendors.rs`'s
-/// known-RGB-vendor allowlist (used by `list`) does NOT imply an entry here —
-/// `list` support and `set` support are independent gates.
-const IMPLEMENTED_PROTOCOLS: &[(u16, u16, ReportBuilder)] = &[];
+/// Which write path a device's protocol uses — see `HidTransport`'s doc comment.
+// Output is unused by any current IMPLEMENTED_PROTOCOLS entry (the only real
+// device so far, Ornata V3, uses Feature) but is part of the stable contract
+// for a future device whose protocol uses plain interrupt writes instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReportKind {
+    #[allow(dead_code)]
+    Output,
+    Feature,
+}
 
-fn implemented_protocol(vendor_id: Option<u16>, product_id: Option<u16>) -> Option<ReportBuilder> {
-    let (vid, pid) = (vendor_id?, product_id?);
+/// Devices this backend has an actually-implemented, working color protocol
+/// for, keyed by (vendor_id, product_id, interface_number). `interface_number`
+/// is part of the key, not just vendor/product: a single physical device like
+/// the Razer Ornata V3 enumerates as several `DeviceInfo` rows (one per HID
+/// interface, see `docs/knowledge/device/hid-interface-enumeration.md`)
+/// sharing one vendor/product id, but only one specific interface accepts
+/// this command protocol — matching on vendor/product alone would attempt
+/// the same report on interfaces that don't understand it.
+///
+/// Razer Ornata V3 (`1532:02a1`, interface 2): confirmed against
+/// `openrazer/openrazer`'s `razerkbd_driver.c` (`USB_DEVICE_ID_RAZER_ORNATA_V3`
+/// dispatches to `razer_chroma_extended_matrix_effect_static` with
+/// `transaction_id = 0x1F`) — see `razer_ornata_v3_static_report`. Being in
+/// `vendors.rs`'s known-RGB-vendor allowlist (used by `list`) does NOT imply
+/// an entry here — `list` support and `set` support are independent gates.
+const IMPLEMENTED_PROTOCOLS: &[(u16, u16, i32, ReportKind, ReportBuilder)] = &[(
+    0x1532,
+    0x02a1,
+    2,
+    ReportKind::Feature,
+    razer_ornata_v3_static_report,
+)];
+
+fn implemented_protocol(
+    vendor_id: Option<u16>,
+    product_id: Option<u16>,
+    interface_number: Option<i32>,
+) -> Option<(ReportKind, ReportBuilder)> {
+    let (vid, pid, iface) = (vendor_id?, product_id?, interface_number?);
     IMPLEMENTED_PROTOCOLS
         .iter()
-        .find(|(v, p, _)| *v == vid && *p == pid)
-        .map(|(_, _, builder)| *builder)
+        .find(|(v, p, i, _, _)| *v == vid && *p == pid && *i == iface)
+        .map(|(_, _, _, kind, builder)| (*kind, *builder))
+}
+
+/// Length of a Razer "Chroma" control report — fixed across the whole
+/// protocol family (status, transaction id, remaining-packet count,
+/// protocol type, data size, command class/id, 80 argument bytes, crc,
+/// reserved). See `openrazer/openrazer`'s `driver/razercommon.h`
+/// `struct razer_report`.
+const RAZER_REPORT_LEN: usize = 90;
+
+/// Razer's report checksum: XOR of every byte from `remaining_packets`
+/// through the end of `arguments` (offsets 2..88), excluding the leading
+/// status/transaction-id bytes and the trailing crc/reserved bytes
+/// themselves. Mirrors `razer_calculate_crc` in `openrazer/openrazer`'s
+/// `driver/razercommon.c`.
+fn razer_crc(report: &[u8; RAZER_REPORT_LEN]) -> u8 {
+    report[2..88].iter().fold(0u8, |crc, &b| crc ^ b)
+}
+
+/// Builds the 90-byte Razer "Chroma" `razer_report` struct for
+/// SET_LED_MATRIX_EFFECT / static-color, as sent for the Ornata V3 and the
+/// other devices sharing its `transaction_id = 0x1F` protocol variant in
+/// `razerkbd_driver.c`'s `matrix_effect_static` dispatch. Command class
+/// `0x0F`/id `0x02`, targeting `VARSTORE`/`BACKLIGHT_LED`, effect `STATIC`
+/// (`0x01`), with `arguments[5] = 0x01` (present in every observed capture
+/// but otherwise unexplained by upstream) followed by the RGB bytes. Pure —
+/// no framing — see `razer_ornata_v3_static_report` for the actual
+/// `ReportBuilder` sent over the wire.
+fn razer_ornata_v3_static_struct(color: &Rgb) -> [u8; RAZER_REPORT_LEN] {
+    const VARSTORE: u8 = 0x01;
+    const BACKLIGHT_LED: u8 = 0x05;
+    const STATIC_EFFECT: u8 = 0x01;
+    const TRANSACTION_ID: u8 = 0x1f;
+    const COMMAND_CLASS: u8 = 0x0f;
+    const COMMAND_ID: u8 = 0x02;
+    const DATA_SIZE: u8 = 9;
+
+    let mut report = [0u8; RAZER_REPORT_LEN];
+    report[1] = TRANSACTION_ID;
+    report[5] = DATA_SIZE;
+    report[6] = COMMAND_CLASS;
+    report[7] = COMMAND_ID;
+    report[8] = VARSTORE;
+    report[9] = BACKLIGHT_LED;
+    report[10] = STATIC_EFFECT;
+    report[13] = 0x01;
+    report[14] = color.r;
+    report[15] = color.g;
+    report[16] = color.b;
+    report[88] = razer_crc(&report);
+    report
+}
+
+/// The actual `ReportBuilder` for the Ornata V3, sent as a Feature report
+/// (`ReportKind::Feature`). Prefixes the 90-byte `razer_report` struct with an
+/// explicit `0x00` HID report-ID byte (91 bytes total) — confirmed
+/// empirically against real hardware, not documented anywhere upstream:
+/// `hidapi`'s Feature-report calls (`send_feature_report`/`get_feature_report`)
+/// require this prefix even for a device that doesn't number its reports
+/// (no `Report ID` tag in its descriptor). Without it, `send_feature_report`
+/// still returns `Ok`, but a `get_feature_report` readback shows the
+/// device's `status` byte stuck at `0x00` (unprocessed) and nothing visibly
+/// changes; with the prefix, `status` comes back `0x02` (success) and the
+/// keyboard's color actually updates. The kernel driver this protocol is
+/// reverse-engineered from doesn't need this prefix because it issues a raw
+/// `usb_control_msg` rather than going through `hidraw`'s Feature-report
+/// ioctls.
+fn razer_ornata_v3_static_report(color: &Rgb) -> Vec<u8> {
+    let body = razer_ornata_v3_static_struct(color);
+    let mut report = Vec::with_capacity(RAZER_REPORT_LEN + 1);
+    report.push(0x00);
+    report.extend_from_slice(&body);
+    report
 }
 
 /// Number of open/write attempts before giving up. Fixed and small: this
@@ -185,7 +299,7 @@ fn identity_matches(original: &DeviceInfo, current: &DeviceInfo) -> bool {
 fn set_color_impl(
     id: &str,
     mut discover: impl FnMut() -> Result<Vec<DeviceInfo>, DeviceError>,
-    resolve_protocol: impl FnOnce(&DeviceInfo) -> Option<ReportBuilder>,
+    resolve_protocol: impl FnOnce(&DeviceInfo) -> Option<(ReportKind, ReportBuilder)>,
     color: &Rgb,
     mut open_transport: impl FnMut(&DeviceInfo) -> Result<Box<dyn HidTransport>, DeviceError>,
     attempts: u32,
@@ -196,10 +310,11 @@ fn set_color_impl(
         .find(|d| d.id == id)
         .ok_or_else(|| DeviceError::NotFound { id: id.to_string() })?;
 
-    let build_report = resolve_protocol(&original).ok_or_else(|| DeviceError::Unsupported {
-        id: id.to_string(),
-        operation: "set_color",
-    })?;
+    let (kind, build_report) =
+        resolve_protocol(&original).ok_or_else(|| DeviceError::Unsupported {
+            id: id.to_string(),
+            operation: "set_color",
+        })?;
 
     let current = discover()?.into_iter().find(|d| d.id == id);
     match current {
@@ -211,7 +326,10 @@ fn set_color_impl(
     let report = build_report(color);
     retry_with_delay(attempts, delay, || {
         let transport = open_transport(&original)?;
-        transport.write_report(&report)
+        match kind {
+            ReportKind::Output => transport.write_report(&report),
+            ReportKind::Feature => transport.write_feature_report(&report),
+        }
     })
 }
 
@@ -229,17 +347,18 @@ fn open_real_transport(info: &DeviceInfo) -> Result<Box<dyn HidTransport>, Devic
 }
 
 impl ColorWriter for HidBackend {
-    /// Sets `color` on the HID device identified by `id`. Returns
-    /// `DeviceError::Unsupported` for every device right now — no real
-    /// target device's protocol has been implemented yet (see
-    /// `IMPLEMENTED_PROTOCOLS`). The surrounding machinery (revalidation,
-    /// retry, transport abstraction) is fully built and tested so adding a
-    /// real device later is a matter of populating that table.
+    /// Sets `color` on the HID device identified by `id`. `IMPLEMENTED_PROTOCOLS`
+    /// currently has one real entry (Razer Ornata V3); every other device
+    /// returns `DeviceError::Unsupported`. The surrounding machinery
+    /// (revalidation, retry, transport abstraction) is fully built and tested
+    /// so adding another real device is a matter of populating that table.
     fn set_color(&self, id: &str, color: Rgb) -> Result<(), DeviceError> {
         set_color_impl(
             id,
             || self.discover(),
-            |device| implemented_protocol(device.vendor_id, device.product_id),
+            |device| {
+                implemented_protocol(device.vendor_id, device.product_id, device.interface_number)
+            },
             &color,
             open_real_transport,
             RETRY_ATTEMPTS,
@@ -285,6 +404,31 @@ mod tests {
     impl HidTransport for RecordingTransport {
         fn write_report(&self, report: &[u8]) -> Result<(), DeviceError> {
             self.calls.borrow_mut().push(report.to_vec());
+            Ok(())
+        }
+
+        fn write_feature_report(&self, report: &[u8]) -> Result<(), DeviceError> {
+            self.calls.borrow_mut().push(report.to_vec());
+            Ok(())
+        }
+    }
+
+    /// Unlike `RecordingTransport` (which records bytes but not which method
+    /// was called), this records *which* `HidTransport` method fired —
+    /// needed to verify `set_color_impl`'s `ReportKind` dispatch actually
+    /// routes to the right one.
+    struct KindRecordingTransport {
+        kinds: Rc<RefCell<Vec<ReportKind>>>,
+    }
+
+    impl HidTransport for KindRecordingTransport {
+        fn write_report(&self, _report: &[u8]) -> Result<(), DeviceError> {
+            self.kinds.borrow_mut().push(ReportKind::Output);
+            Ok(())
+        }
+
+        fn write_feature_report(&self, _report: &[u8]) -> Result<(), DeviceError> {
+            self.kinds.borrow_mut().push(ReportKind::Feature);
             Ok(())
         }
     }
@@ -342,7 +486,7 @@ mod tests {
         let result = set_color_impl(
             &id,
             || Ok(vec![device.clone()]),
-            |_d| Some(fake_report as ReportBuilder),
+            |_d| Some((ReportKind::Output, fake_report as ReportBuilder)),
             &Rgb { r: 1, g: 2, b: 3 },
             move |_info| {
                 Ok(Box::new(RecordingTransport {
@@ -355,6 +499,56 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(calls.borrow().as_slice(), &[vec![0xaa, 1, 2, 3]]);
+    }
+
+    #[test]
+    fn set_color_dispatches_feature_kind_to_write_feature_report() {
+        let device = hid_device("/dev/hidraw0", 0x1234, 0x5678, 0);
+        let id = device.id.clone();
+        let kinds = Rc::new(RefCell::new(Vec::new()));
+        let kinds_for_transport = kinds.clone();
+
+        let result = set_color_impl(
+            &id,
+            || Ok(vec![device.clone()]),
+            |_d| Some((ReportKind::Feature, fake_report as ReportBuilder)),
+            &Rgb { r: 1, g: 2, b: 3 },
+            move |_info| {
+                Ok(Box::new(KindRecordingTransport {
+                    kinds: kinds_for_transport.clone(),
+                }) as Box<dyn HidTransport>)
+            },
+            RETRY_ATTEMPTS,
+            || {},
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(kinds.borrow().as_slice(), &[ReportKind::Feature]);
+    }
+
+    #[test]
+    fn set_color_dispatches_output_kind_to_write_report() {
+        let device = hid_device("/dev/hidraw0", 0x1234, 0x5678, 0);
+        let id = device.id.clone();
+        let kinds = Rc::new(RefCell::new(Vec::new()));
+        let kinds_for_transport = kinds.clone();
+
+        let result = set_color_impl(
+            &id,
+            || Ok(vec![device.clone()]),
+            |_d| Some((ReportKind::Output, fake_report as ReportBuilder)),
+            &Rgb { r: 1, g: 2, b: 3 },
+            move |_info| {
+                Ok(Box::new(KindRecordingTransport {
+                    kinds: kinds_for_transport.clone(),
+                }) as Box<dyn HidTransport>)
+            },
+            RETRY_ATTEMPTS,
+            || {},
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(kinds.borrow().as_slice(), &[ReportKind::Output]);
     }
 
     #[test]
@@ -382,7 +576,7 @@ mod tests {
         let result = set_color_impl(
             "does-not-exist",
             || Ok(vec![device.clone()]),
-            |_d| Some(fake_report as ReportBuilder),
+            |_d| Some((ReportKind::Output, fake_report as ReportBuilder)),
             &Rgb { r: 0, g: 0, b: 0 },
             |_info| unreachable!("must not attempt to open a transport when the id is unknown"),
             RETRY_ATTEMPTS,
@@ -413,7 +607,7 @@ mod tests {
                     Ok(vec![swapped.clone()])
                 }
             },
-            |_d| Some(fake_report as ReportBuilder),
+            |_d| Some((ReportKind::Output, fake_report as ReportBuilder)),
             &Rgb { r: 0, g: 0, b: 0 },
             |_info| unreachable!("must not write once identity has changed"),
             RETRY_ATTEMPTS,
@@ -440,7 +634,7 @@ mod tests {
                     Ok(vec![])
                 }
             },
-            |_d| Some(fake_report as ReportBuilder),
+            |_d| Some((ReportKind::Output, fake_report as ReportBuilder)),
             &Rgb { r: 0, g: 0, b: 0 },
             |_info| unreachable!("must not write once the device is gone"),
             RETRY_ATTEMPTS,
@@ -462,7 +656,7 @@ mod tests {
         let result = set_color_impl(
             &id,
             || Ok(vec![device.clone()]),
-            |_d| Some(fake_report as ReportBuilder),
+            |_d| Some((ReportKind::Output, fake_report as ReportBuilder)),
             &Rgb { r: 9, g: 9, b: 9 },
             move |_info| {
                 let n = attempt.get();
@@ -494,7 +688,7 @@ mod tests {
         let result = set_color_impl(
             &id,
             || Ok(vec![device.clone()]),
-            |_d| Some(fake_report as ReportBuilder),
+            |_d| Some((ReportKind::Output, fake_report as ReportBuilder)),
             &Rgb { r: 0, g: 0, b: 0 },
             move |_info| {
                 attempt_for_open.set(attempt_for_open.get() + 1);
@@ -516,7 +710,7 @@ mod tests {
         let result = set_color_impl(
             &id,
             || Ok(vec![device.clone()]),
-            |_d| Some(fake_report as ReportBuilder),
+            |_d| Some((ReportKind::Output, fake_report as ReportBuilder)),
             &Rgb { r: 0, g: 0, b: 0 },
             |_info| {
                 Err(DeviceError::PermissionDenied {
@@ -533,10 +727,66 @@ mod tests {
     // --- supporting helpers ---
 
     #[test]
-    fn implemented_protocol_is_empty_for_now() {
-        assert!(implemented_protocol(Some(0x1b1c), Some(0x1)).is_none());
-        assert!(implemented_protocol(None, Some(0x1)).is_none());
-        assert!(implemented_protocol(Some(0x1b1c), None).is_none());
+    fn implemented_protocol_has_no_entry_for_unknown_device() {
+        assert!(implemented_protocol(Some(0x1b1c), Some(0x1), Some(0)).is_none());
+        assert!(implemented_protocol(None, Some(0x1), Some(0)).is_none());
+        assert!(implemented_protocol(Some(0x1b1c), None, Some(0)).is_none());
+        assert!(implemented_protocol(Some(0x1b1c), Some(0x1), None).is_none());
+    }
+
+    #[test]
+    fn implemented_protocol_matches_ornata_v3_only_on_its_specific_interface() {
+        let (kind, _builder) = implemented_protocol(Some(0x1532), Some(0x02a1), Some(2))
+            .expect("Ornata V3 interface 2 must resolve to a protocol");
+        assert_eq!(kind, ReportKind::Feature);
+
+        // Same vendor/product but a different interface (e.g. the plain
+        // keyboard boot interface) must not match — only interface 2 speaks
+        // this command protocol.
+        assert!(implemented_protocol(Some(0x1532), Some(0x02a1), Some(0)).is_none());
+    }
+
+    #[test]
+    fn razer_ornata_v3_static_struct_matches_known_captures() {
+        // Byte layout confirmed against openrazer's
+        // razer_chroma_extended_matrix_effect_static doc comment: e.g.
+        // "010501000001ff0000" for pure red (arguments[0..8]).
+        let color = Rgb {
+            r: 0xff,
+            g: 0x00,
+            b: 0x00,
+        };
+        let report = razer_ornata_v3_static_struct(&color);
+
+        assert_eq!(report[1], 0x1f, "transaction_id");
+        assert_eq!(report[5], 9, "data_size");
+        assert_eq!(report[6], 0x0f, "command_class");
+        assert_eq!(report[7], 0x02, "command_id");
+        assert_eq!(
+            &report[8..17],
+            &[0x01, 0x05, 0x01, 0x00, 0x00, 0x01, 0xff, 0x00, 0x00],
+            "arguments: varstore, backlight_led, static effect, pad, pad, 0x01, r, g, b"
+        );
+        // Hardcoded, not re-derived via razer_crc (that would be tautological
+        // since razer_crc built this same byte during construction): XOR of
+        // 0x09^0x0f^0x02^0x01^0x05^0x01^0x01^0xff (data_size, command_class,
+        // command_id, varstore, backlight_led, static_effect, arg[5]=0x01, r)
+        // over the crc range [2..88) — every other byte in range is zero.
+        assert_eq!(report[88], 0xff);
+    }
+
+    #[test]
+    fn razer_ornata_v3_static_report_prefixes_report_id_byte() {
+        // Confirmed empirically against real hardware (see the function's
+        // doc comment): hidapi's Feature-report calls need this leading
+        // 0x00 even though the device doesn't number its reports.
+        let color = Rgb { r: 1, g: 2, b: 3 };
+        let wire = razer_ornata_v3_static_report(&color);
+        let body = razer_ornata_v3_static_struct(&color);
+
+        assert_eq!(wire.len(), RAZER_REPORT_LEN + 1);
+        assert_eq!(wire[0], 0x00, "leading HID report-id byte");
+        assert_eq!(&wire[1..], &body);
     }
 
     #[test]
