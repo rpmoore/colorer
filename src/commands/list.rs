@@ -5,13 +5,22 @@ const EMPTY_MESSAGE: &str = "no known RGB devices found (try --all)";
 
 /// Run the `list` command: discover via all given backends, filter (unless
 /// show_all), format as a table.
+///
+/// Partial-failure policy: if one backend's `discover()` errors, its results
+/// are simply omitted (with a warning line) rather than failing the whole
+/// command — a backend being unreadable (e.g. no `/sys/class/leds`) must not
+/// sink another backend's results.
 pub fn run_list(
     backends: &[Box<dyn DeviceBackend>],
     show_all: bool,
 ) -> Result<String, DeviceError> {
     let mut devices = Vec::new();
+    let mut warnings = Vec::new();
     for backend in backends {
-        devices.extend(backend.discover()?);
+        match backend.discover() {
+            Ok(found) => devices.extend(found),
+            Err(err) => warnings.push(format!("warning: backend discovery failed: {err}")),
+        }
     }
 
     let filtered: Vec<&DeviceInfo> = devices
@@ -19,11 +28,19 @@ pub fn run_list(
         .filter(|d| show_all || is_allowed(d))
         .collect();
 
-    if filtered.is_empty() {
-        return Ok(EMPTY_MESSAGE.to_string());
+    let mut out = String::new();
+    for warning in &warnings {
+        out.push_str(warning);
+        out.push('\n');
     }
 
-    Ok(format_table(&filtered))
+    if filtered.is_empty() {
+        out.push_str(EMPTY_MESSAGE);
+        return Ok(out);
+    }
+
+    out.push_str(&format_table(&filtered));
+    Ok(out)
 }
 
 /// Vendor-allowlist filtering applies only to HID-sourced entries; sysfs
@@ -52,6 +69,7 @@ fn format_table(devices: &[&DeviceInfo]) -> String {
             DeviceCapability::Unknown => "unknown",
             DeviceCapability::SingleColor => "single-color",
             DeviceCapability::MultiColor => "multi-color",
+            DeviceCapability::VendorColor => "vendor-color",
         };
         out.push_str(&format!(
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
@@ -74,6 +92,18 @@ impl DeviceBackend for FakeBackend {
 }
 
 #[cfg(test)]
+struct FailingBackend;
+
+#[cfg(test)]
+impl DeviceBackend for FailingBackend {
+    fn discover(&self) -> Result<Vec<DeviceInfo>, DeviceError> {
+        Err(DeviceError::Io(std::io::Error::other(
+            "simulated backend failure",
+        )))
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::device::make_id;
@@ -90,6 +120,21 @@ mod tests {
             usage: Some(6),
             path: path.to_string(),
             capability: DeviceCapability::Unknown,
+        }
+    }
+
+    fn sysfs_device(label: &str, path: &str) -> DeviceInfo {
+        DeviceInfo {
+            id: make_id(DeviceSource::Sysfs, path),
+            source: DeviceSource::Sysfs,
+            label: label.to_string(),
+            vendor_id: None,
+            product_id: None,
+            interface_number: None,
+            usage_page: None,
+            usage: None,
+            path: path.to_string(),
+            capability: DeviceCapability::SingleColor,
         }
     }
 
@@ -159,5 +204,46 @@ mod tests {
         let a = hid_device("Corsair Keyboard", "/dev/hidraw0", 0x1b1c);
         let b = hid_device("Corsair Keyboard", "/dev/hidraw1", 0x1b1c);
         assert_ne!(a.id, b.id);
+    }
+
+    #[test]
+    fn merged_table_labels_each_row_source() {
+        let hid: Box<dyn DeviceBackend> = Box::new(FakeBackend {
+            devices: vec![hid_device("Corsair Keyboard", "/dev/hidraw0", 0x1b1c)],
+        });
+        let sysfs: Box<dyn DeviceBackend> = Box::new(FakeBackend {
+            devices: vec![sysfs_device("rgb0", "/sys/class/leds/rgb0")],
+        });
+        let backends = vec![hid, sysfs];
+
+        let result = run_list(&backends, true).unwrap();
+        assert!(result.contains("\thid\t"));
+        assert!(result.contains("\tsysfs\t"));
+    }
+
+    #[test]
+    fn sysfs_backend_error_still_returns_hid_results_with_warning() {
+        let hid: Box<dyn DeviceBackend> = Box::new(FakeBackend {
+            devices: vec![hid_device("Corsair Keyboard", "/dev/hidraw0", 0x1b1c)],
+        });
+        let failing: Box<dyn DeviceBackend> = Box::new(FailingBackend);
+        let backends = vec![hid, failing];
+
+        let result = run_list(&backends, false).unwrap();
+        assert!(result.contains("Corsair Keyboard"));
+        assert!(result.contains("warning:"));
+    }
+
+    #[test]
+    fn hid_backend_error_still_returns_sysfs_results_with_warning() {
+        let failing: Box<dyn DeviceBackend> = Box::new(FailingBackend);
+        let sysfs: Box<dyn DeviceBackend> = Box::new(FakeBackend {
+            devices: vec![sysfs_device("rgb0", "/sys/class/leds/rgb0")],
+        });
+        let backends = vec![failing, sysfs];
+
+        let result = run_list(&backends, false).unwrap();
+        assert!(result.contains("rgb0"));
+        assert!(result.contains("warning:"));
     }
 }

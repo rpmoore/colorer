@@ -11,3 +11,6 @@ clap = { version = "4", features = ["derive"] }
 # backend needs libudev-dev, unavailable in the build environment). Also
 # keeps "native device access, no external app" closer to the spec's intent.
 hidapi = { version = "2", default-features = false, features = ["linux-native-basic-udev"] }
+
+[dev-dependencies]
+tempfile = "3"

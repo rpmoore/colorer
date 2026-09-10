@@ -1,6 +1,7 @@
 use std::fmt;
 
 pub mod hid;
+pub mod sysfs;
 pub mod vendors;
 
 /// Where a device was discovered.
@@ -16,15 +17,19 @@ pub enum DeviceSource {
 /// This is a *discovery-time* guess, not a promise that `set` supports the device —
 /// later milestones additionally gate `set` on an actually-implemented protocol
 /// for that specific device, not just this capability tag.
-// SingleColor/MultiColor are produced starting in section-03 (sysfs classification);
-// only Unknown is constructed by this section's HID backend.
+// SingleColor/MultiColor/VendorColor are produced by SysfsBackend classification
+// (src/device/sysfs.rs); only Unknown is constructed by the HID backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeviceCapability {
     Unknown,
-    #[allow(dead_code)]
     SingleColor,
-    #[allow(dead_code)]
     MultiColor,
+    /// Non-standard drivers (e.g. `hid-ite8291r3`-style) expose a `color`
+    /// sysfs file taking a hex-triplet string instead of the standard
+    /// `multi_*` scheme. Recorded at discovery time so section-06 (M5) can
+    /// determine, from discovery output alone, whether a device uses this
+    /// vendor attribute before attempting to write to it.
+    VendorColor,
 }
 
 /// One discovered RGB-capable (or possibly-RGB-capable) device.
