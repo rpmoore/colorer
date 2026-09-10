@@ -1,0 +1,8 @@
+[package]
+name = "colorer"
+version = "0.1.0"
+edition = "2024"
+description = "CLI to discover and control RGB-capable hardware on Linux via native device access"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
