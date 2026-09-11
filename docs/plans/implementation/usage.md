@@ -27,12 +27,21 @@ cargo run -- set <id> <color>
 Parses `<color>` (`RRGGBB` or `#RRGGBB` hex) and writes it via whichever backend's `id` prefix
 (`hid-`/`sysfs-`) matches.
 
-- **HID**: fully built (revalidation, retry, Output/Feature transport abstraction). One real,
-  hardware-verified protocol entry: Razer Ornata V3 (`1532:02a1`, interface 2) via a Feature
-  report — reverse-engineered from `openrazer/openrazer`'s driver source and confirmed live
-  against a physical keyboard. Every other HID device still returns `Unsupported`. See
-  `docs/knowledge/device/set-color-hid.md` for the protocol details and an empirically-discovered
-  framing gotcha (hidapi needs an explicit report-ID prefix byte even for unnumbered reports).
+- **HID**: fully built (revalidation, retry, Output/Feature transport abstraction, multi-report
+  sequences). Two real, hardware-verified protocol entries:
+  - Razer Ornata V3 (`1532:02a1`, interface 2) — a single Feature report, reverse-engineered from
+    `openrazer/openrazer`'s driver source and confirmed live against a physical keyboard.
+  - Gigabyte RGB Fusion 2's CPU-area ARGB strip (`048d:5711`, interface 1) — a 5-report Gen2
+    addressable-strip sequence (disable built-in effect, 3 chunked LED-color writes, apply),
+    reverse-engineered from `OpenRGB`'s driver source and confirmed live. **Scoped to one header
+    on one motherboard model** (Gigabyte X870E AORUS PRO) — the board's other 5 zones (case fans,
+    chipset/IO-cover accent LEDs) are untouched by `set` on this device's id.
+
+  Every other HID device still returns `Unsupported`. See `docs/knowledge/device/set-color-hid.md`
+  for both protocols' details, an empirically-discovered Razer framing gotcha (hidapi needs an
+  explicit report-ID prefix byte even for unnumbered reports), and a Gigabyte behavioral hazard
+  (a mis-scoped "disable built-in effect" command briefly turned off all onboard lighting during
+  reverse-engineering).
 - **Sysfs**: `MultiColor` (writes `multi_intensity` in `multi_index`'s order, scaled against
   `multi_max_intensity`, plus raises `brightness`) and `VendorColor` (writes an `aabbcc` hex
   string to `color`) are implemented and tested. `SingleColor` (fixed-color) devices return
@@ -60,8 +69,12 @@ real `MultiColor`/`VendorColor` device that does show up.
 
 1. Reverse-engineer more real RGB-capable HID devices (e.g. the Razer Naga X / Tartarus Pro also
    present on the dev machine) to add further `IMPLEMENTED_PROTOCOLS` rows in `src/device/hid.rs`.
-2. Identify a real `MultiColor`/`VendorColor` sysfs LED device to: write the concrete udev rule
+2. Extend Gigabyte support to the board's other 5 zones (`LED_C`, `IO Cover`, `Chipset Accent`,
+   and the other two Gen2 ARGB strips) — needs each one independently confirmed live, plus a real
+   read-back capability (`HidTransport` is currently write-only) if strip length/calibration
+   should be read dynamically rather than hardcoded per board model.
+3. Identify a real `MultiColor`/`VendorColor` sysfs LED device to: write the concrete udev rule
    in `packaging/udev/71-colorer.rules`, run manual hardware verification, and consider adding
    write-retry to `SysfsBackend::set_color` (currently has none, unlike the HID path).
-3. If other RGB control software (OpenRGB, `openrazer-daemon`) runs concurrently, it can fight
+4. If other RGB control software (OpenRGB, `openrazer-daemon`) runs concurrently, it can fight
    over device state with `colorer set` — no locking exists on either side.

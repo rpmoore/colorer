@@ -111,10 +111,14 @@ fn map_hid_error(err: HidError) -> DeviceError {
     DeviceError::Hid(err)
 }
 
-/// Builds an outgoing HID report from a color. Kept as a plain function
-/// pointer (not a closure) so both production and tests can pass it around
-/// without capturing state.
-type ReportBuilder = fn(&Rgb) -> Vec<u8>;
+/// Builds the outgoing HID report(s) for a color, in send order. Most
+/// protocols are a single report (e.g. Razer), but some (e.g. Gigabyte RGB
+/// Fusion 2: set-effect then apply) need a short fixed sequence sent one
+/// after another — a `Vec` rather than a single report keeps that without a
+/// second `ReportKind`/builder type. Kept as a plain function pointer (not a
+/// closure) so both production and tests can pass it around without
+/// capturing state.
+type ReportBuilder = fn(&Rgb) -> Vec<Vec<u8>>;
 
 /// Which write path a device's protocol uses — see `HidTransport`'s doc comment.
 // Output is unused by any current IMPLEMENTED_PROTOCOLS entry (the only real
@@ -139,16 +143,34 @@ enum ReportKind {
 /// Razer Ornata V3 (`1532:02a1`, interface 2): confirmed against
 /// `openrazer/openrazer`'s `razerkbd_driver.c` (`USB_DEVICE_ID_RAZER_ORNATA_V3`
 /// dispatches to `razer_chroma_extended_matrix_effect_static` with
-/// `transaction_id = 0x1F`) — see `razer_ornata_v3_static_report`. Being in
-/// `vendors.rs`'s known-RGB-vendor allowlist (used by `list`) does NOT imply
-/// an entry here — `list` support and `set` support are independent gates.
-const IMPLEMENTED_PROTOCOLS: &[(u16, u16, i32, ReportKind, ReportBuilder)] = &[(
-    0x1532,
-    0x02a1,
-    2,
-    ReportKind::Feature,
-    razer_ornata_v3_static_report,
-)];
+/// `transaction_id = 0x1F`) — see `razer_ornata_v3_static_report`.
+///
+/// Gigabyte RGB Fusion 2 onboard controller (`048d:5711`, an ITE IT5711 chip,
+/// interface 1) — specifically its CPU-area ARGB strip header only, on one
+/// specific motherboard model: confirmed against `OpenRGB`'s
+/// `Controllers/GigabyteRGBFusion2USBController` plus live hardware
+/// verification — see `gigabyte_fusion2_cpu_strip_report`'s doc comment for
+/// the full scope caveat.
+///
+/// Being in `vendors.rs`'s known-RGB-vendor allowlist (used by `list`) does
+/// NOT imply an entry here — `list` support and `set` support are
+/// independent gates.
+const IMPLEMENTED_PROTOCOLS: &[(u16, u16, i32, ReportKind, ReportBuilder)] = &[
+    (
+        0x1532,
+        0x02a1,
+        2,
+        ReportKind::Feature,
+        razer_ornata_v3_static_report,
+    ),
+    (
+        0x048d,
+        0x5711,
+        1,
+        ReportKind::Feature,
+        gigabyte_fusion2_cpu_strip_report,
+    ),
+];
 
 fn implemented_protocol(
     vendor_id: Option<u16>,
@@ -226,12 +248,155 @@ fn razer_ornata_v3_static_struct(color: &Rgb) -> [u8; RAZER_REPORT_LEN] {
 /// reverse-engineered from doesn't need this prefix because it issues a raw
 /// `usb_control_msg` rather than going through `hidraw`'s Feature-report
 /// ioctls.
-fn razer_ornata_v3_static_report(color: &Rgb) -> Vec<u8> {
+fn razer_ornata_v3_static_report(color: &Rgb) -> Vec<Vec<u8>> {
     let body = razer_ornata_v3_static_struct(color);
     let mut report = Vec::with_capacity(RAZER_REPORT_LEN + 1);
     report.push(0x00);
     report.extend_from_slice(&body);
-    report
+    vec![report]
+}
+
+/// Length of a Gigabyte RGB Fusion 2 (ITE IT5711-family) control report —
+/// includes the leading report-ID byte, matching the device's own HID
+/// descriptor (`Report ID 0xCC`, report size 8 bits × count 0x3F = 63 data
+/// bytes + 1 ID byte = 64). See `OpenRGB`'s
+/// `GigabyteRGBFusion2USBController.h`'s `FUSION2_USB_BUFFER_SIZE`.
+const GIGABYTE_REPORT_LEN: usize = 64;
+
+/// The report ID this controller's Feature reports are numbered under —
+/// present as an explicit `Report ID` tag in the device's HID descriptor
+/// (confirmed against the real `hidraw` report descriptor), unlike the
+/// Ornata V3's unnumbered reports. Because it's a genuine numbered report,
+/// the buffer sent is exactly `GIGABYTE_REPORT_LEN` bytes with this as
+/// byte 0 — no extra framing prefix needed (contrast
+/// `razer_ornata_v3_static_report`'s doc comment).
+const GIGABYTE_REPORT_ID: u8 = 0xcc;
+
+/// This is a `RGBFUSION2_57XX_LEDS_MAX`-addressable "Gen2" ARGB strip
+/// (`OpenRGB`'s `SupportsGen2`/`ScanGen2Strips`), not a simple fixed-color
+/// hardware "effect" zone: an earlier implementation tried the generic
+/// `PktEffect`/`EFFECT_STATIC` command used by `OpenRGB`'s "Motherboard LEDs
+/// always use effect mode" comment, but on this board that command had no
+/// visible effect at all — direct per-LED "Direct" mode
+/// (`SetStripColors`/`PktRGB`) is what actually works, confirmed live.
+///
+/// Scoped to exactly one header on one motherboard model — **not** a
+/// general Gigabyte RGB Fusion 2 implementation:
+/// - Board: Gigabyte X870E AORUS PRO (`048d:5711`, ITE IT5711 chip,
+///   `OpenRGB`'s `it5711_11_device` layout).
+/// - Header: `HDR_D_LED2` / zone "ARGB_V2_2" (the CPU-area ARGB strip) —
+///   the only one of this board's 6 zones (3 "Linear" ARGB strips + 3
+///   "Single" LEDs: `LED_C`/`IO Cover`/`Chipset Accent`) that was actually
+///   probed and hardware-confirmed. `colorer set` on this device therefore
+///   only changes the CPU strip's color — other zones (case fans,
+///   motherboard accent lighting, etc.) are untouched.
+///
+/// Two per-board-model facts baked in here, confirmed empirically rather
+/// than assumed, since both are known to vary by board/header and getting
+/// either wrong silently scrambles the LED colors instead of erroring:
+/// - **LED count (48)**: from a live `OpenRGB`-protocol "Gen2" strip scan
+///   (`GEN2_LED_BASE_SCAN`-based scan/detect handshake) against this exact
+///   header — not read dynamically here (`ReportBuilder` is a pure
+///   `fn(&Rgb) -> Vec<Vec<u8>>`, no read-back capability in `HidTransport`
+///   yet; scanning would need one).
+/// - **Channel byte order (`GRB`)**: from this device's own calibration
+///   register (`cal_strip1` in the info-report readback, decoded per
+///   `OpenRGB`'s `DecodeCalibrationBuffer`) — not the naive
+///   `RGBToBGRColor`-packed order the earlier (non-working) effect-based
+///   attempt used. Verified by sending pure red and observing pure red.
+///
+/// # A real behavioral hazard hit while reverse-engineering this
+///
+/// `SetStripBuiltinEffectState`'s `enable` parameter is inverted from what
+/// its name suggests: `enable = true` **re-enables** the firmware's
+/// autonomous built-in effect (clears the header's bit in the "disabled"
+/// bitmask register, command `0x32`); `enable = false` is what disables it
+/// so the host can drive raw per-LED colors instead. Sending the bitmask
+/// for *every* header with the disable meaning (as an earlier debug attempt
+/// did, intending to silence a strobing default effect before setting a
+/// static color) disables the built-in effect renderer everywhere at
+/// once — including for the zones the caller never intended to touch — and
+/// visibly turned off lighting across the whole board until a
+/// `0x32`-with-zero (re-enable everything) command was sent. This function's
+/// own disable command only *names* the one header it writes to
+/// (`DISABLE_BUILTIN_BIT_D_LED2`) — but see the caveat below, it's still not
+/// a fully safe operation with respect to other headers' state.
+///
+/// # Known gaps, accepted rather than solved here
+///
+/// - **Not a read-modify-write.** The disable-bitmask register (command
+///   `0x32`) is written as an *absolute* byte containing only this header's
+///   bit, not merged with the register's actual current value — `HidTransport`
+///   has no read-back capability, so there's nothing to merge with. If some
+///   other header's disable bit was set by something else (concurrent
+///   `colorer` use targeting a different header once one exists, or another
+///   RGB tool), this call incidentally clears it, re-enabling that header's
+///   built-in effect as a side effect. Low-probability on a single-user
+///   machine running only this tool against only this one header, but a real
+///   gap, not a solved one.
+/// - **Partial-sequence failure has no rollback.** If the disable-builtin
+///   report succeeds but a later report in the sequence (an LED chunk, or
+///   apply) fails on every retry, `set_color_impl` returns an error but the
+///   device is left with this header's built-in effect disabled and no
+///   static color ever applied — i.e. dark, not merely "unchanged" — until a
+///   later successful `set_color` call (or a manual re-enable) fixes it.
+fn gigabyte_fusion2_cpu_strip_report(color: &Rgb) -> Vec<Vec<u8>> {
+    /// `HDR_D_LED2`'s bit in the built-in-effect-disable bitmask register
+    /// (command `0x32`) — see `SetStripBuiltinEffectState`'s `switch(hdr)`.
+    const DISABLE_BUILTIN_BIT_D_LED2: u8 = 0x02;
+    /// `HDR_D_LED2_ARGB` — the header byte `PktRGB::Init` maps `HDR_D_LED2`
+    /// to for addressable-strip writes.
+    const HEADER_D_LED2_ARGB: u8 = 0x59;
+    const NUM_LEDS: usize = 48;
+    /// Max LEDs per `PktRGB` packet: `sizeof(leds[19])` in `OpenRGB`'s
+    /// `PktRGB::RGBData`.
+    const LEDS_PER_PACKET: usize = 19;
+    /// This board's calibrated channel order for `HDR_D_LED2` (`cal_strip1`
+    /// decoded as `"GRB"`): byte-within-LED offsets for each channel.
+    const CHANNEL_OFFSET_R: usize = 1;
+    const CHANNEL_OFFSET_G: usize = 0;
+    const CHANNEL_OFFSET_B: usize = 2;
+
+    fn new_report(command: u8) -> [u8; GIGABYTE_REPORT_LEN] {
+        let mut report = [0u8; GIGABYTE_REPORT_LEN];
+        report[0] = GIGABYTE_REPORT_ID;
+        report[1] = command;
+        report
+    }
+
+    let mut reports = Vec::with_capacity(1 + NUM_LEDS.div_ceil(LEDS_PER_PACKET) + 1);
+
+    let mut disable_builtin = new_report(0x32);
+    disable_builtin[2] = DISABLE_BUILTIN_BIT_D_LED2;
+    reports.push(disable_builtin.to_vec());
+
+    let led_indices: Vec<usize> = (0..NUM_LEDS).collect();
+    for chunk in led_indices.chunks(LEDS_PER_PACKET) {
+        let sent = chunk[0];
+        let byte_count = chunk.len() * 3;
+        debug_assert!(
+            byte_count <= u8::MAX as usize,
+            "PktRGB's bcount field is a single byte; LEDS_PER_PACKET must stay small enough"
+        );
+
+        let mut report = new_report(HEADER_D_LED2_ARGB);
+        report[2..4].copy_from_slice(&((sent * 3) as u16).to_le_bytes());
+        report[4] = byte_count as u8;
+        for i in 0..chunk.len() {
+            let base = 5 + i * 3;
+            report[base + CHANNEL_OFFSET_R] = color.r;
+            report[base + CHANNEL_OFFSET_G] = color.g;
+            report[base + CHANNEL_OFFSET_B] = color.b;
+        }
+        reports.push(report.to_vec());
+    }
+
+    let mut apply = new_report(0x28);
+    apply[2] = 0xff;
+    apply[3] = 0x07;
+    reports.push(apply.to_vec());
+
+    reports
 }
 
 /// Number of open/write attempts before giving up. Fixed and small: this
@@ -282,7 +447,8 @@ fn identity_matches(original: &DeviceInfo, current: &DeviceInfo) -> bool {
 ///    to anyway.
 /// 3. Re-run `discover` and confirm the device at `id` still exists and still
 ///    matches its originally-discovered identity (`DeviceGone`/`IdentityMismatch`).
-/// 4. Build the report and write it via `open_transport`, retried up to
+/// 4. Build the report sequence and write each one in order via
+///    `open_transport`, retried (from the start of the sequence) up to
 ///    `attempts` times with `delay` between attempts.
 ///
 /// Scope note: both `discover` calls happen within this single `set`
@@ -323,13 +489,16 @@ fn set_color_impl(
         Some(_) => return Err(DeviceError::IdentityMismatch { id: id.to_string() }),
     }
 
-    let report = build_report(color);
+    let reports = build_report(color);
     retry_with_delay(attempts, delay, || {
         let transport = open_transport(&original)?;
-        match kind {
-            ReportKind::Output => transport.write_report(&report),
-            ReportKind::Feature => transport.write_feature_report(&report),
+        for report in &reports {
+            match kind {
+                ReportKind::Output => transport.write_report(report),
+                ReportKind::Feature => transport.write_feature_report(report),
+            }?;
         }
+        Ok(())
     })
 }
 
@@ -348,10 +517,11 @@ fn open_real_transport(info: &DeviceInfo) -> Result<Box<dyn HidTransport>, Devic
 
 impl ColorWriter for HidBackend {
     /// Sets `color` on the HID device identified by `id`. `IMPLEMENTED_PROTOCOLS`
-    /// currently has one real entry (Razer Ornata V3); every other device
-    /// returns `DeviceError::Unsupported`. The surrounding machinery
-    /// (revalidation, retry, transport abstraction) is fully built and tested
-    /// so adding another real device is a matter of populating that table.
+    /// currently has two real entries (Razer Ornata V3, Gigabyte RGB Fusion 2's
+    /// CPU strip); every other device returns `DeviceError::Unsupported`. The
+    /// surrounding machinery (revalidation, retry, transport abstraction) is
+    /// fully built and tested so adding another real device is a matter of
+    /// populating that table.
     fn set_color(&self, id: &str, color: Rgb) -> Result<(), DeviceError> {
         set_color_impl(
             id,
@@ -393,8 +563,8 @@ mod tests {
         }
     }
 
-    fn fake_report(color: &Rgb) -> Vec<u8> {
-        vec![0xaa, color.r, color.g, color.b]
+    fn fake_report(color: &Rgb) -> Vec<Vec<u8>> {
+        vec![vec![0xaa, color.r, color.g, color.b]]
     }
 
     struct RecordingTransport {
@@ -549,6 +719,107 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(kinds.borrow().as_slice(), &[ReportKind::Output]);
+    }
+
+    fn multi_report(color: &Rgb) -> Vec<Vec<u8>> {
+        vec![
+            vec![0x01, color.r],
+            vec![0x02, color.g],
+            vec![0x03, color.b],
+        ]
+    }
+
+    #[test]
+    fn set_color_sends_a_multi_report_builder_s_reports_in_order() {
+        let device = hid_device("/dev/hidraw0", 0x1234, 0x5678, 0);
+        let id = device.id.clone();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let calls_for_transport = calls.clone();
+
+        let result = set_color_impl(
+            &id,
+            || Ok(vec![device.clone()]),
+            |_d| Some((ReportKind::Feature, multi_report as ReportBuilder)),
+            &Rgb { r: 9, g: 8, b: 7 },
+            move |_info| {
+                Ok(Box::new(RecordingTransport {
+                    calls: calls_for_transport.clone(),
+                }) as Box<dyn HidTransport>)
+            },
+            RETRY_ATTEMPTS,
+            || {},
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(
+            calls.borrow().as_slice(),
+            &[vec![0x01, 9], vec![0x02, 8], vec![0x03, 7]],
+            "all reports sent, in builder order"
+        );
+    }
+
+    #[test]
+    fn set_color_retries_the_whole_sequence_on_a_mid_sequence_failure() {
+        // A failure on the *second* report of a 3-report sequence must not
+        // resume from report 2 on retry — the whole sequence restarts from
+        // report 1, so the device never receives report 2 or 3 without
+        // report 1 immediately before them in the same attempt.
+        let device = hid_device("/dev/hidraw0", 0x1234, 0x5678, 0);
+        let id = device.id.clone();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let calls_for_transport = calls.clone();
+        let call_count = Rc::new(Cell::new(0u32));
+        let call_count_for_transport = call_count.clone();
+
+        struct FlakyOnSecondCallTransport {
+            calls: Rc<RefCell<Vec<Vec<u8>>>>,
+            call_count: Rc<Cell<u32>>,
+        }
+
+        impl HidTransport for FlakyOnSecondCallTransport {
+            fn write_report(&self, _report: &[u8]) -> Result<(), DeviceError> {
+                unreachable!("this test only uses Feature reports")
+            }
+
+            fn write_feature_report(&self, report: &[u8]) -> Result<(), DeviceError> {
+                let n = self.call_count.get();
+                self.call_count.set(n + 1);
+                if n == 1 {
+                    return Err(marker_error());
+                }
+                self.calls.borrow_mut().push(report.to_vec());
+                Ok(())
+            }
+        }
+
+        let result = set_color_impl(
+            &id,
+            || Ok(vec![device.clone()]),
+            |_d| Some((ReportKind::Feature, multi_report as ReportBuilder)),
+            &Rgb { r: 9, g: 8, b: 7 },
+            move |_info| {
+                Ok(Box::new(FlakyOnSecondCallTransport {
+                    calls: calls_for_transport.clone(),
+                    call_count: call_count_for_transport.clone(),
+                }) as Box<dyn HidTransport>)
+            },
+            RETRY_ATTEMPTS,
+            || {},
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(
+            calls.borrow().as_slice(),
+            &[
+                vec![0x01, 9], // attempt 1: report 1 succeeds...
+                // ...then report 2 fails, aborting attempt 1 (not recorded)
+                vec![0x01, 9], // attempt 2: report 1 is *resent*, not skipped
+                vec![0x02, 8],
+                vec![0x03, 7],
+            ],
+            "a failed attempt's already-sent reports are resent on retry, \
+             not resumed from the failure point"
+        );
     }
 
     #[test]
@@ -781,12 +1052,68 @@ mod tests {
         // doc comment): hidapi's Feature-report calls need this leading
         // 0x00 even though the device doesn't number its reports.
         let color = Rgb { r: 1, g: 2, b: 3 };
-        let wire = razer_ornata_v3_static_report(&color);
+        let reports = razer_ornata_v3_static_report(&color);
         let body = razer_ornata_v3_static_struct(&color);
 
+        assert_eq!(reports.len(), 1, "single-report protocol");
+        let wire = &reports[0];
         assert_eq!(wire.len(), RAZER_REPORT_LEN + 1);
         assert_eq!(wire[0], 0x00, "leading HID report-id byte");
         assert_eq!(&wire[1..], &body);
+    }
+
+    #[test]
+    fn gigabyte_fusion2_cpu_strip_report_sends_disable_chunks_then_apply() {
+        let color = Rgb {
+            r: 0xff,
+            g: 0x7f,
+            b: 0x00,
+        };
+        let reports = gigabyte_fusion2_cpu_strip_report(&color);
+
+        // disable-builtin, 3 LED-write chunks (19+19+10=48), apply
+        assert_eq!(reports.len(), 5);
+        for report in &reports {
+            assert_eq!(report.len(), GIGABYTE_REPORT_LEN);
+            assert_eq!(report[0], GIGABYTE_REPORT_ID);
+        }
+
+        let disable = &reports[0];
+        assert_eq!(
+            &disable[1..3],
+            &[0x32, 0x02],
+            "disable built-in effect, HDR_D_LED2's bit only"
+        );
+
+        let chunk_sizes: Vec<u8> = reports[1..4].iter().map(|r| r[4]).collect();
+        assert_eq!(
+            chunk_sizes,
+            vec![19 * 3, 19 * 3, 10 * 3],
+            "48 LEDs chunked at 19 per packet: bcount = led_count * 3"
+        );
+
+        let first_chunk = &reports[1];
+        assert_eq!(first_chunk[1], 0x59, "header: HDR_D_LED2_ARGB");
+        assert_eq!(
+            &first_chunk[2..4],
+            &[0, 0],
+            "boffset: first chunk starts at 0"
+        );
+        assert_eq!(
+            &first_chunk[5..8],
+            &[color.g, color.r, color.b],
+            "first LED's 3 bytes in this board's calibrated GRB order"
+        );
+
+        let second_chunk = &reports[2];
+        assert_eq!(
+            &second_chunk[2..4],
+            &(19u16 * 3).to_le_bytes(),
+            "boffset: second chunk starts after 19 LEDs * 3 bytes"
+        );
+
+        let apply = &reports[4];
+        assert_eq!(&apply[1..4], &[0x28, 0xff, 0x07]);
     }
 
     #[test]
