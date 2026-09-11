@@ -38,15 +38,18 @@ Parses `<color>` (`RRGGBB` or `#RRGGBB` hex) and writes it via whichever backend
     already covered by an unrelated system Razer rule.
   - Razer Tartarus Pro (`1532:0244`, interface 2) — same struct shape as the Ornata V3
     (`openrazer/openrazer` dispatches both through the same `case` block); confirmed live.
-  - Gigabyte RGB Fusion 2 (`048d:5711`, interface 1) — a 7-report sequence covering 3 of this
-    board's 6 zones: the CPU-area ARGB strip (Gen2 addressable/Direct mode, disable built-in
-    effect + 3 chunked LED-color writes), plus the motherboard-logo "IO Cover" and "Chipset
-    Accent" LEDs (the simple fixed-color "effect" command), then one shared apply.
-    Reverse-engineered from `OpenRGB`'s driver source and confirmed live, all 3 zones changing
-    together in one real `set` call. **Scoped to one motherboard model** (Gigabyte X870E AORUS
-    PRO) — the board's other 3 zones (`LED_C`, apparently unpopulated; 2 further Gen2 ARGB
-    strips, both reporting 0 LEDs on a scan) and case fans (confirmed unresponsive to every zone
-    this chip exposes — likely a separate controller) are untouched.
+  - Gigabyte RGB Fusion 2 (`048d:5711`, interface 1) — a 9-report sequence covering 4 of this
+    board's 6 zones: the case-fan ARGB header and the CPU-area ARGB strip (both Gen2
+    addressable/Direct mode: disable built-in effect for both, then chunked LED-color writes for
+    each), plus the motherboard-logo "IO Cover" and "Chipset Accent" LEDs (the simple fixed-color
+    "effect" command), then one shared apply. Reverse-engineered from `OpenRGB`'s driver source
+    and confirmed live, all 4 zones changing together in one real `set` call. The case-fan
+    header's LED count (28) was found by binary search rather than `OpenRGB`'s own scan/detect
+    handshake, which never worked against these specific fans despite the header being genuinely
+    Gen2-capable — see `docs/knowledge/device/set-color-hid.md` for the full story. **Scoped to
+    one motherboard model** (Gigabyte X870E AORUS PRO) — the board's other 2 zones (`LED_C`,
+    apparently unpopulated; one further Gen2 ARGB strip, reporting 0 LEDs on a scan with nothing
+    known to be connected there) are untouched.
 
   Every other HID device still returns `Unsupported`. See `docs/knowledge/device/set-color-hid.md`
   for all four protocols' details, an empirically-discovered Razer framing gotcha (hidapi needs an
@@ -88,11 +91,12 @@ real `MultiColor`/`VendorColor` device that does show up.
 1. Reverse-engineer more real RGB-capable HID devices to add further `IMPLEMENTED_PROTOCOLS` rows
    in `src/device/hid.rs` — every device currently on the dev machine (Ornata V3, Naga X, Tartarus
    Pro, Gigabyte) is now covered.
-2. `LED_C` and the two other Gen2 ARGB strips on the Gigabyte board appear unpopulated (no
-   observed response / 0 LEDs on scan) — nothing further to add there without different hardware.
-   A real read-back capability (`HidTransport` is currently write-only) would let strip
-   length/calibration be read dynamically instead of hardcoded per board model, useful for a
-   different Gigabyte board.
+2. `LED_C` on the Gigabyte board appears unpopulated (no observed response). The remaining Gen2
+   ARGB strip (`ARGB_V2_3`) reports 0 LEDs on a scan, but that scan is known unreliable (it also
+   failed for the case-fan header, which turned out to work fine via a blind write) — worth a
+   blind-write probe if something is ever connected there. A real read-back capability
+   (`HidTransport` is currently write-only) would let strip length/calibration be read
+   dynamically instead of hardcoded per board model, useful for a different Gigabyte board.
 3. Identify a real `MultiColor`/`VendorColor` sysfs LED device to: write the concrete udev rule
    in `packaging/udev/71-colorer.rules`, run manual hardware verification, and consider adding
    write-retry to `SysfsBackend::set_color` (currently has none, unlike the HID path).

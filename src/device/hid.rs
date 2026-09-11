@@ -370,23 +370,41 @@ const GIGABYTE_REPORT_LEN: usize = 64;
 /// `razer_ornata_v3_static_report`'s doc comment).
 const GIGABYTE_REPORT_ID: u8 = 0xcc;
 
-/// Three of this board's 6 zones, confirmed live:
-/// - `HDR_D_LED2` / "ARGB_V2_2" (the CPU-area ARGB strip, 48 LEDs) — a
-///   `RGBFUSION2_57XX_LEDS_MAX`-addressable "Gen2" strip (`OpenRGB`'s
-///   `SupportsGen2`/`ScanGen2Strips`), controlled via direct per-LED
-///   "Direct" mode (`SetStripColors`/`PktRGB`).
-/// - `IO Cover` (`LED10`, this board's motherboard-logo LED) and
-///   `Chipset Accent` (`LED11`) — simple fixed-color hardware "effect"
-///   zones, controlled via `PktEffect`/`EFFECT_STATIC` (the same generic
-///   command an earlier attempt tried, and failed with, for the CPU strip —
-///   it's the right mechanism for these two, just the wrong one for a Gen2
-///   addressable strip).
+/// Four of this board's 6 zones, confirmed live:
+/// - `HDR_D_LED1` / "ARGB_V2_1" (this board's case-fan ARGB header, 28
+///   LEDs) and `HDR_D_LED2` / "ARGB_V2_2" (the CPU-area ARGB strip, 48
+///   LEDs) — both `RGBFUSION2_57XX_LEDS_MAX`-addressable "Gen2" strips
+///   (`OpenRGB`'s `SupportsGen2`/`ScanGen2Strips`), controlled via direct
+///   per-LED "Direct" mode (`SetStripColors`/`PktRGB`).
+/// - `IO Cover` (`LED10`, the motherboard-logo LED) and `Chipset Accent`
+///   (`LED11`) — simple fixed-color hardware "effect" zones, controlled via
+///   `PktEffect`/`EFFECT_STATIC` (the same generic command an earlier
+///   attempt tried, and failed with, for the CPU strip — it's the right
+///   mechanism for these two, just the wrong one for a Gen2 addressable
+///   strip).
+///
+/// **The case-fan header's `ScanGen2Strips` scan/detect handshake never
+/// worked, despite the header genuinely being a working Gen2 strip.** A live
+/// scan of it always reports 0 LEDs, with the fans physically connected and
+/// responsive to other commands on that same header. A "0 LEDs" Gen2 scan
+/// result does **not** mean the header isn't Gen2-capable — an initial
+/// (wrong) conclusion here was that the header must be non-addressable and
+/// needed the simple effect command instead; that produced a single flat
+/// color across the whole fan chain (no per-LED addressing) and was
+/// replaced once a *blind* `PktRGB` write (skipping the broken scan
+/// entirely, guessing then binary-searching the LED count against what was
+/// visibly lit) confirmed true per-LED Gen2/Direct addressing works fine on
+/// this header — the scan handshake itself is what's broken, likely because
+/// these particular fans don't implement whatever proprietary
+/// identify/response `OpenRGB`'s scan protocol expects, even though the
+/// underlying `PktRGB` per-LED write protocol doesn't care whether a scan
+/// ever succeeded.
 ///
 /// Board: Gigabyte X870E AORUS PRO (`048d:5711`, ITE IT5711 chip,
 /// `OpenRGB`'s `it5711_11_device` layout, 6 zones total). Not covered:
-/// - `ARGB_V2_1`/`ARGB_V2_3`, the other two Gen2 strip headers — a live
-///   scan found 0 LEDs on both, i.e. nothing physically connected on this
-///   board.
+/// - `ARGB_V2_3`, the remaining Gen2 strip header — a live scan found 0
+///   LEDs, and unlike the case-fan header above, nothing is known to be
+///   physically connected there to retest a blind write against.
 /// - `LED_C` (`led = 4`): tried and abandoned. Its effect-register write
 ///   accepted and visually matched once (turned red on the very first
 ///   attempt, in the same batch that genuinely fixed IO Cover/Chipset
@@ -396,30 +414,34 @@ const GIGABYTE_REPORT_ID: u8 = 0xcc;
 ///   was already red from unrelated leftover state) rather than this
 ///   command actually reaching a real, populated LED on this board.
 ///
-/// `colorer set` on this device therefore changes these 3 zones; case fans
-/// and any other board lighting not listed above are untouched — confirmed
-/// separately unresponsive to every zone/header this chip exposes, so
-/// likely wired through a different controller entirely, not just an
-/// unimplemented zone here.
+/// `colorer set` on this device therefore changes these 4 zones; any other
+/// board lighting not listed above is untouched.
 ///
-/// One per-board-model fact baked into the CPU strip's LED count (`48`),
-/// confirmed empirically rather than assumed, since it's known to vary by
-/// board/header and getting it wrong silently scrambles the LED colors
-/// instead of erroring: from a live `OpenRGB`-protocol "Gen2" strip scan
-/// (`GEN2_LED_BASE_SCAN`-based scan/detect handshake) against this exact
-/// header — not read dynamically here (`ReportBuilder` is a pure
-/// `fn(&Rgb) -> Vec<Vec<u8>>`, no read-back capability in `HidTransport`
-/// yet; scanning would need one). Its channel byte order (`GRB`) is
-/// likewise from this device's own calibration register (`cal_strip1` in
-/// the info-report readback, decoded per `OpenRGB`'s
-/// `DecodeCalibrationBuffer`) — not the naive `RGBToBGRColor`-packed order
-/// the earlier (non-working) effect-based attempt used for it. Verified by
-/// sending pure red and observing pure red. `IO Cover`/`Chipset Accent`'s
-/// `PktEffect` color field uses that same `RGBToBGRColor` packing
-/// (`[b, g, r]` at offsets 14-16) — confirmed correct for *these* two zones
-/// specifically by observing the exact colors sent.
+/// Per-board-model facts baked in here, confirmed empirically rather than
+/// assumed, since they're known to vary by board/header and getting them
+/// wrong silently scrambles the LED colors instead of erroring:
+/// - **LED counts** (case-fan header: `28`; CPU strip: `48`): the CPU
+///   strip's came from a live `OpenRGB`-protocol Gen2 scan
+///   (`GEN2_LED_BASE_SCAN`-based handshake); the case-fan header's scan
+///   never worked (see above), so its count was instead found by binary
+///   search — writing an all-red prefix of length `k` followed by black for
+///   the rest, and narrowing `k` based on whether any LEDs stayed
+///   dark. Neither is read dynamically here (`ReportBuilder` is a pure
+///   `fn(&Rgb) -> Vec<Vec<u8>>`, no read-back capability in `HidTransport`
+///   yet; scanning would need one).
+/// - **Channel byte order (`GRB`)**: from this device's own calibration
+///   registers (`cal_strip0` for `HDR_D_LED1`, `cal_strip1` for
+///   `HDR_D_LED2` — both identical on this board — in the info-report
+///   readback, decoded per `OpenRGB`'s `DecodeCalibrationBuffer`) — not the
+///   naive `RGBToBGRColor`-packed order the earlier (non-working)
+///   effect-based attempt used for the CPU strip. Verified on both headers
+///   by sending distinct per-channel test colors and observing the correct
+///   colors rendered. `IO Cover`/`Chipset Accent`'s `PktEffect` color field
+///   uses that same `RGBToBGRColor` packing (`[b, g, r]` at offsets 14-16) —
+///   confirmed correct for these two zones specifically by observing the
+///   exact colors sent.
 ///
-/// # A real behavioral hazard hit while reverse-engineering this
+/// # A real behavioral hazard hit while reverse-engineering this — twice
 ///
 /// `SetStripBuiltinEffectState`'s `enable` parameter is inverted from what
 /// its name suggests: `enable = true` **re-enables** the firmware's
@@ -432,45 +454,57 @@ const GIGABYTE_REPORT_ID: u8 = 0xcc;
 /// once — including for the zones the caller never intended to touch — and
 /// visibly turned off lighting across the whole board (including IO
 /// Cover/Chipset Accent) until a `0x32`-with-zero (re-enable everything)
-/// command was sent to recover. This function's own disable command only
-/// *names* `HDR_D_LED2`'s bit — the fact that this leaves every other
-/// header's bit cleared (i.e. their built-in effect enabled) is
-/// deliberately relied on: it's exactly the state `IO Cover`/`Chipset
-/// Accent`'s effect-based writes below need to render.
+/// command was sent to recover. Hit again, independently, while identifying
+/// the case-fan header: a one-off debug probe disabled `HDR_D_LED1`'s bit
+/// specifically (to test whether an effect-based write needed it disabled,
+/// before the Gen2/Direct approach was found) — this turned the fans off
+/// too, needing the same `0x32`-with-zero recovery. This function's own
+/// disable command *names* both Gen2 headers' bits at once (`HDR_D_LED1`
+/// and `HDR_D_LED2`) — the fact that this leaves every other header's bit
+/// cleared (i.e. their built-in effect enabled) is deliberately relied on:
+/// it's exactly the state `IO Cover`/`Chipset Accent`'s effect-based writes
+/// below need to render.
 ///
 /// # Known gaps, accepted rather than solved here
 ///
 /// - **Not a read-modify-write.** The disable-bitmask register (command
-///   `0x32`) is written as an *absolute* byte containing only `HDR_D_LED2`'s
-///   bit, not merged with the register's actual current value —
+///   `0x32`) is written as an *absolute* byte containing only these two
+///   headers' bits, not merged with the register's actual current value —
 ///   `HidTransport` has no read-back capability, so there's nothing to merge
 ///   with. If some other header's disable bit was set by something else
-///   (another RGB tool, concurrent `colorer` use once a 4th zone is added),
-///   this call incidentally clears it too, re-enabling that header's
-///   built-in effect as a side effect. Low-probability on a single-user
-///   machine running only this tool, but a real gap, not a solved one.
+///   (another RGB tool, or a future `colorer` entry for a 5th zone), this
+///   call incidentally clears it too, re-enabling that header's built-in
+///   effect as a side effect. Low-probability on a single-user machine
+///   running only this tool, but a real gap, not a solved one.
 /// - **Partial-sequence failure has no rollback.** `set_color_impl` retries
 ///   the whole sequence from the start on failure, but writes each report to
 ///   the real device as it goes — if the disable-builtin report succeeds and
 ///   a later report (an LED chunk, an effect-zone write, or apply) then
 ///   fails on every retry, the device is left in a worse state than before
-///   the call: the CPU strip's built-in effect disabled with no static color
-///   ever applied (dark, not merely unchanged), and/or IO Cover/Chipset
-///   Accent showing a stale color from before this call, not the new one —
-///   until a later successful `set_color` call fixes it.
+///   the call: one or both Gen2 strips' built-in effect disabled with no
+///   static color ever applied (dark, not merely unchanged), and/or IO
+///   Cover/Chipset Accent showing a stale color from before this call, not
+///   the new one — until a later successful `set_color` call fixes it.
 fn gigabyte_fusion2_static_report(color: &Rgb) -> Vec<Vec<u8>> {
-    /// `HDR_D_LED2`'s bit in the built-in-effect-disable bitmask register
-    /// (command `0x32`) — see `SetStripBuiltinEffectState`'s `switch(hdr)`.
+    /// `HDR_D_LED1`'s bit in the built-in-effect-disable bitmask register
+    /// (command `0x32`) — `SetStripBuiltinEffectState`'s `switch(hdr)` has
+    /// no explicit case for `HDR_D_LED1`, so it falls to the `default` bit.
+    const DISABLE_BUILTIN_BIT_D_LED1: u8 = 0x01;
+    /// `HDR_D_LED2`'s bit in the same register — see `switch(hdr)`'s
+    /// explicit `case LED4: case HDR_D_LED2:`.
     const DISABLE_BUILTIN_BIT_D_LED2: u8 = 0x02;
-    /// `HDR_D_LED2_ARGB` — the header byte `PktRGB::Init` maps `HDR_D_LED2`
-    /// to for addressable-strip writes.
+    /// `HDR_D_LED1_ARGB`/`HDR_D_LED2_ARGB` — the header bytes `PktRGB::Init`
+    /// maps `HDR_D_LED1`/`HDR_D_LED2` to for addressable-strip writes.
+    const HEADER_D_LED1_ARGB: u8 = 0x58;
     const HEADER_D_LED2_ARGB: u8 = 0x59;
-    const NUM_LEDS: usize = 48;
+    const CASE_FAN_NUM_LEDS: usize = 28;
+    const CPU_STRIP_NUM_LEDS: usize = 48;
     /// Max LEDs per `PktRGB` packet: `sizeof(leds[19])` in `OpenRGB`'s
     /// `PktRGB::RGBData`.
     const LEDS_PER_PACKET: usize = 19;
-    /// This board's calibrated channel order for `HDR_D_LED2` (`cal_strip1`
-    /// decoded as `"GRB"`): byte-within-LED offsets for each channel.
+    /// This board's calibrated channel order, shared by both Gen2 headers
+    /// (`cal_strip0`/`cal_strip1` decoded identically as `"GRB"`):
+    /// byte-within-LED offsets for each channel.
     const CHANNEL_OFFSET_R: usize = 1;
     const CHANNEL_OFFSET_G: usize = 0;
     const CHANNEL_OFFSET_B: usize = 2;
@@ -488,6 +522,36 @@ fn gigabyte_fusion2_static_report(color: &Rgb) -> Vec<Vec<u8>> {
         report[0] = GIGABYTE_REPORT_ID;
         report[1] = command;
         report
+    }
+
+    /// Builds the chunked `PktRGB`/Direct-mode reports for a Gen2
+    /// addressable strip: every LED set to the same `color`, split into
+    /// `LEDS_PER_PACKET`-sized packets (`OpenRGB`'s `PktRGB::RGBData::leds`
+    /// is a fixed 19-entry array).
+    fn gen2_strip_reports(header: u8, num_leds: usize, color: &Rgb) -> Vec<Vec<u8>> {
+        let led_indices: Vec<usize> = (0..num_leds).collect();
+        led_indices
+            .chunks(LEDS_PER_PACKET)
+            .map(|chunk| {
+                let sent = chunk[0];
+                let byte_count = chunk.len() * 3;
+                debug_assert!(
+                    byte_count <= u8::MAX as usize,
+                    "PktRGB's bcount field is a single byte; LEDS_PER_PACKET must stay small enough"
+                );
+
+                let mut report = new_report(header);
+                report[2..4].copy_from_slice(&((sent * 3) as u16).to_le_bytes());
+                report[4] = byte_count as u8;
+                for i in 0..chunk.len() {
+                    let base = 5 + i * 3;
+                    report[base + CHANNEL_OFFSET_R] = color.r;
+                    report[base + CHANNEL_OFFSET_G] = color.g;
+                    report[base + CHANNEL_OFFSET_B] = color.b;
+                }
+                report.to_vec()
+            })
+            .collect()
     }
 
     /// Builds a `PktEffect`/`EFFECT_STATIC` report for a single-LED effect
@@ -510,35 +574,30 @@ fn gigabyte_fusion2_static_report(color: &Rgb) -> Vec<Vec<u8>> {
         report
     }
 
-    let mut reports = Vec::with_capacity(1 + NUM_LEDS.div_ceil(LEDS_PER_PACKET) + 2 + 1);
+    let mut reports = Vec::with_capacity(
+        1 + CASE_FAN_NUM_LEDS.div_ceil(LEDS_PER_PACKET)
+            + CPU_STRIP_NUM_LEDS.div_ceil(LEDS_PER_PACKET)
+            + 2
+            + 1,
+    );
 
-    // Disabling only HDR_D_LED2's bit leaves every other header's bit
+    // Disabling both Gen2 headers' bits leaves every other header's bit
     // cleared (enabled) — exactly what IO Cover/Chipset Accent's
     // effect-based writes below need. See the doc comment above.
     let mut disable_builtin = new_report(0x32);
-    disable_builtin[2] = DISABLE_BUILTIN_BIT_D_LED2;
+    disable_builtin[2] = DISABLE_BUILTIN_BIT_D_LED1 | DISABLE_BUILTIN_BIT_D_LED2;
     reports.push(disable_builtin.to_vec());
 
-    let led_indices: Vec<usize> = (0..NUM_LEDS).collect();
-    for chunk in led_indices.chunks(LEDS_PER_PACKET) {
-        let sent = chunk[0];
-        let byte_count = chunk.len() * 3;
-        debug_assert!(
-            byte_count <= u8::MAX as usize,
-            "PktRGB's bcount field is a single byte; LEDS_PER_PACKET must stay small enough"
-        );
-
-        let mut report = new_report(HEADER_D_LED2_ARGB);
-        report[2..4].copy_from_slice(&((sent * 3) as u16).to_le_bytes());
-        report[4] = byte_count as u8;
-        for i in 0..chunk.len() {
-            let base = 5 + i * 3;
-            report[base + CHANNEL_OFFSET_R] = color.r;
-            report[base + CHANNEL_OFFSET_G] = color.g;
-            report[base + CHANNEL_OFFSET_B] = color.b;
-        }
-        reports.push(report.to_vec());
-    }
+    reports.extend(gen2_strip_reports(
+        HEADER_D_LED1_ARGB,
+        CASE_FAN_NUM_LEDS,
+        color,
+    ));
+    reports.extend(gen2_strip_reports(
+        HEADER_D_LED2_ARGB,
+        CPU_STRIP_NUM_LEDS,
+        color,
+    ));
 
     reports.push(effect_static_report(IO_COVER_LED, color).to_vec());
     reports.push(effect_static_report(CHIPSET_ACCENT_LED, color).to_vec());
@@ -1314,7 +1373,7 @@ mod tests {
     }
 
     #[test]
-    fn gigabyte_fusion2_static_report_sends_disable_chunks_effect_zones_then_apply() {
+    fn gigabyte_fusion2_static_report_sends_disable_both_strips_effect_zones_then_apply() {
         let color = Rgb {
             r: 0xff,
             g: 0x7f,
@@ -1322,9 +1381,9 @@ mod tests {
         };
         let reports = gigabyte_fusion2_static_report(&color);
 
-        // disable-builtin, 3 CPU-strip LED-write chunks (19+19+10=48), IO
-        // Cover effect, Chipset Accent effect, apply
-        assert_eq!(reports.len(), 7);
+        // disable-builtin, 2 case-fan chunks (19+9=28), 3 CPU-strip chunks
+        // (19+19+10=48), IO Cover effect, Chipset Accent effect, apply
+        assert_eq!(reports.len(), 9);
         for report in &reports {
             assert_eq!(report.len(), GIGABYTE_REPORT_LEN);
             assert_eq!(report[0], GIGABYTE_REPORT_ID);
@@ -1333,38 +1392,46 @@ mod tests {
         let disable = &reports[0];
         assert_eq!(
             &disable[1..3],
-            &[0x32, 0x02],
-            "disable built-in effect, HDR_D_LED2's bit only"
+            &[0x32, 0x01 | 0x02],
+            "disable built-in effect for both Gen2 headers: HDR_D_LED1 and HDR_D_LED2's bits"
         );
 
-        let chunk_sizes: Vec<u8> = reports[1..4].iter().map(|r| r[4]).collect();
+        let fan_chunk_sizes: Vec<u8> = reports[1..3].iter().map(|r| r[4]).collect();
         assert_eq!(
-            chunk_sizes,
-            vec![19 * 3, 19 * 3, 10 * 3],
-            "48 LEDs chunked at 19 per packet: bcount = led_count * 3"
+            fan_chunk_sizes,
+            vec![19 * 3, 9 * 3],
+            "28 case-fan LEDs chunked at 19 per packet"
         );
-
-        let first_chunk = &reports[1];
-        assert_eq!(first_chunk[1], 0x59, "header: HDR_D_LED2_ARGB");
+        let first_fan_chunk = &reports[1];
+        assert_eq!(first_fan_chunk[1], 0x58, "header: HDR_D_LED1_ARGB");
+        assert_eq!(&first_fan_chunk[2..4], &[0, 0], "boffset: starts at 0");
         assert_eq!(
-            &first_chunk[2..4],
-            &[0, 0],
-            "boffset: first chunk starts at 0"
-        );
-        assert_eq!(
-            &first_chunk[5..8],
+            &first_fan_chunk[5..8],
             &[color.g, color.r, color.b],
             "first LED's 3 bytes in this board's calibrated GRB order"
         );
 
-        let second_chunk = &reports[2];
+        let cpu_chunk_sizes: Vec<u8> = reports[3..6].iter().map(|r| r[4]).collect();
         assert_eq!(
-            &second_chunk[2..4],
+            cpu_chunk_sizes,
+            vec![19 * 3, 19 * 3, 10 * 3],
+            "48 CPU-strip LEDs chunked at 19 per packet"
+        );
+        let first_cpu_chunk = &reports[3];
+        assert_eq!(first_cpu_chunk[1], 0x59, "header: HDR_D_LED2_ARGB");
+        assert_eq!(
+            &first_cpu_chunk[2..4],
+            &[0, 0],
+            "boffset: first chunk starts at 0"
+        );
+        let second_cpu_chunk = &reports[4];
+        assert_eq!(
+            &second_cpu_chunk[2..4],
             &(19u16 * 3).to_le_bytes(),
             "boffset: second chunk starts after 19 LEDs * 3 bytes"
         );
 
-        let io_cover = &reports[4];
+        let io_cover = &reports[6];
         assert_eq!(io_cover[1], 0x91, "header: 0x90 + (led 9 - 8) (IO Cover)");
         assert_eq!(&io_cover[2..6], &(1u32 << 9).to_le_bytes(), "zone0 bit");
         assert_eq!(io_cover[11], 0x01, "effect_type: static");
@@ -1375,7 +1442,7 @@ mod tests {
             "color0: b, g, r (RGBToBGRColor packing, confirmed live for this zone)"
         );
 
-        let chipset_accent = &reports[5];
+        let chipset_accent = &reports[7];
         assert_eq!(
             chipset_accent[1], 0x92,
             "header: 0x90 + (led 10 - 8) (Chipset Accent)"
@@ -1387,7 +1454,7 @@ mod tests {
         );
         assert_eq!(&chipset_accent[14..17], &[color.b, color.g, color.r]);
 
-        let apply = &reports[6];
+        let apply = &reports[8];
         assert_eq!(&apply[1..4], &[0x28, 0xff, 0x07]);
     }
 
