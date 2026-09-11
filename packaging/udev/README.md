@@ -9,8 +9,8 @@ need this — they don't open a device handle.
 `src/device/hid.rs`'s `IMPLEMENTED_PROTOCOLS`: Razer Ornata V3 (`1532:02a1`,
 interface 2), Razer Naga X (`1532:0096`, interface 3), Razer Tartarus Pro
 (`1532:0244`, interface 2), and the Gigabyte RGB Fusion 2 onboard controller
-(`048d:5711`, interface 1, CPU ARGB strip only — see
-`gigabyte_fusion2_cpu_strip_report`'s doc comment for that device's scope
+(`048d:5711`, interface 1, CPU strip/IO Cover/Chipset Accent zones only —
+see `gigabyte_fusion2_static_report`'s doc comment for that device's scope
 caveat). Each line matches `ATTRS{bInterfaceNumber}` too, scoped to the exact
 interface `colorer` writes to — not just `idVendor`/`idProduct`, which would
 grant `uaccess` to every hidraw interface the device exposes (e.g. a

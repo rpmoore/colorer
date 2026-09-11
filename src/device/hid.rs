@@ -122,7 +122,7 @@ type ReportBuilder = fn(&Rgb) -> Vec<Vec<u8>>;
 
 /// Which write path a device's protocol uses — see `HidTransport`'s doc comment.
 // Output is unused by any current IMPLEMENTED_PROTOCOLS entry (every real
-// device so far — Ornata V3, Naga X, Gigabyte's CPU strip — uses Feature)
+// device so far — Ornata V3, Naga X, Tartarus Pro, Gigabyte — uses Feature)
 // but is part of the stable contract for a future device whose protocol
 // uses plain interrupt writes instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -161,11 +161,11 @@ enum ReportKind {
 /// `matrix_effect_static`'s dispatch — see `razer_tartarus_pro_static_report`.
 ///
 /// Gigabyte RGB Fusion 2 onboard controller (`048d:5711`, an ITE IT5711 chip,
-/// interface 1) — specifically its CPU-area ARGB strip header only, on one
-/// specific motherboard model: confirmed against `OpenRGB`'s
-/// `Controllers/GigabyteRGBFusion2USBController` plus live hardware
-/// verification — see `gigabyte_fusion2_cpu_strip_report`'s doc comment for
-/// the full scope caveat.
+/// interface 1) — 3 of its 6 zones (CPU-area ARGB strip, motherboard-logo
+/// "IO Cover", and "Chipset Accent"), on one specific motherboard model:
+/// confirmed against `OpenRGB`'s `Controllers/GigabyteRGBFusion2USBController`
+/// plus live hardware verification — see `gigabyte_fusion2_static_report`'s
+/// doc comment for the full scope caveat.
 ///
 /// Being in `vendors.rs`'s known-RGB-vendor allowlist (used by `list`) does
 /// NOT imply an entry here — `list` support and `set` support are
@@ -197,7 +197,7 @@ const IMPLEMENTED_PROTOCOLS: &[(u16, u16, i32, ReportKind, ReportBuilder)] = &[
         0x5711,
         1,
         ReportKind::Feature,
-        gigabyte_fusion2_cpu_strip_report,
+        gigabyte_fusion2_static_report,
     ),
 ];
 
@@ -333,7 +333,7 @@ fn razer_report_wire_bytes(body: &[u8; RAZER_REPORT_LEN]) -> Vec<u8> {
 /// `transaction_id = 0x1F`.
 ///
 /// **No rollback on partial-sequence failure**, same class of gap as
-/// `gigabyte_fusion2_cpu_strip_report`'s: `set_color_impl` writes each report
+/// `gigabyte_fusion2_static_report`'s: `set_color_impl` writes each report
 /// to the real device as it sends them, so if the scroll-wheel report
 /// succeeds but the left-side report then fails on every retry, `set_color`
 /// returns an error while the mouse is left with its two zones showing
@@ -370,38 +370,54 @@ const GIGABYTE_REPORT_LEN: usize = 64;
 /// `razer_ornata_v3_static_report`'s doc comment).
 const GIGABYTE_REPORT_ID: u8 = 0xcc;
 
-/// This is a `RGBFUSION2_57XX_LEDS_MAX`-addressable "Gen2" ARGB strip
-/// (`OpenRGB`'s `SupportsGen2`/`ScanGen2Strips`), not a simple fixed-color
-/// hardware "effect" zone: an earlier implementation tried the generic
-/// `PktEffect`/`EFFECT_STATIC` command used by `OpenRGB`'s "Motherboard LEDs
-/// always use effect mode" comment, but on this board that command had no
-/// visible effect at all — direct per-LED "Direct" mode
-/// (`SetStripColors`/`PktRGB`) is what actually works, confirmed live.
+/// Three of this board's 6 zones, confirmed live:
+/// - `HDR_D_LED2` / "ARGB_V2_2" (the CPU-area ARGB strip, 48 LEDs) — a
+///   `RGBFUSION2_57XX_LEDS_MAX`-addressable "Gen2" strip (`OpenRGB`'s
+///   `SupportsGen2`/`ScanGen2Strips`), controlled via direct per-LED
+///   "Direct" mode (`SetStripColors`/`PktRGB`).
+/// - `IO Cover` (`LED10`, this board's motherboard-logo LED) and
+///   `Chipset Accent` (`LED11`) — simple fixed-color hardware "effect"
+///   zones, controlled via `PktEffect`/`EFFECT_STATIC` (the same generic
+///   command an earlier attempt tried, and failed with, for the CPU strip —
+///   it's the right mechanism for these two, just the wrong one for a Gen2
+///   addressable strip).
 ///
-/// Scoped to exactly one header on one motherboard model — **not** a
-/// general Gigabyte RGB Fusion 2 implementation:
-/// - Board: Gigabyte X870E AORUS PRO (`048d:5711`, ITE IT5711 chip,
-///   `OpenRGB`'s `it5711_11_device` layout).
-/// - Header: `HDR_D_LED2` / zone "ARGB_V2_2" (the CPU-area ARGB strip) —
-///   the only one of this board's 6 zones (3 "Linear" ARGB strips + 3
-///   "Single" LEDs: `LED_C`/`IO Cover`/`Chipset Accent`) that was actually
-///   probed and hardware-confirmed. `colorer set` on this device therefore
-///   only changes the CPU strip's color — other zones (case fans,
-///   motherboard accent lighting, etc.) are untouched.
+/// Board: Gigabyte X870E AORUS PRO (`048d:5711`, ITE IT5711 chip,
+/// `OpenRGB`'s `it5711_11_device` layout, 6 zones total). Not covered:
+/// - `ARGB_V2_1`/`ARGB_V2_3`, the other two Gen2 strip headers — a live
+///   scan found 0 LEDs on both, i.e. nothing physically connected on this
+///   board.
+/// - `LED_C` (`led = 4`): tried and abandoned. Its effect-register write
+///   accepted and visually matched once (turned red on the very first
+///   attempt, in the same batch that genuinely fixed IO Cover/Chipset
+///   Accent below), but two subsequent attempts with different colors
+///   (cyan, then white, with generous delays) produced no visible change at
+///   all — strong evidence that first "success" was coincidental (the LED
+///   was already red from unrelated leftover state) rather than this
+///   command actually reaching a real, populated LED on this board.
 ///
-/// Two per-board-model facts baked in here, confirmed empirically rather
-/// than assumed, since both are known to vary by board/header and getting
-/// either wrong silently scrambles the LED colors instead of erroring:
-/// - **LED count (48)**: from a live `OpenRGB`-protocol "Gen2" strip scan
-///   (`GEN2_LED_BASE_SCAN`-based scan/detect handshake) against this exact
-///   header — not read dynamically here (`ReportBuilder` is a pure
-///   `fn(&Rgb) -> Vec<Vec<u8>>`, no read-back capability in `HidTransport`
-///   yet; scanning would need one).
-/// - **Channel byte order (`GRB`)**: from this device's own calibration
-///   register (`cal_strip1` in the info-report readback, decoded per
-///   `OpenRGB`'s `DecodeCalibrationBuffer`) — not the naive
-///   `RGBToBGRColor`-packed order the earlier (non-working) effect-based
-///   attempt used. Verified by sending pure red and observing pure red.
+/// `colorer set` on this device therefore changes these 3 zones; case fans
+/// and any other board lighting not listed above are untouched — confirmed
+/// separately unresponsive to every zone/header this chip exposes, so
+/// likely wired through a different controller entirely, not just an
+/// unimplemented zone here.
+///
+/// One per-board-model fact baked into the CPU strip's LED count (`48`),
+/// confirmed empirically rather than assumed, since it's known to vary by
+/// board/header and getting it wrong silently scrambles the LED colors
+/// instead of erroring: from a live `OpenRGB`-protocol "Gen2" strip scan
+/// (`GEN2_LED_BASE_SCAN`-based scan/detect handshake) against this exact
+/// header — not read dynamically here (`ReportBuilder` is a pure
+/// `fn(&Rgb) -> Vec<Vec<u8>>`, no read-back capability in `HidTransport`
+/// yet; scanning would need one). Its channel byte order (`GRB`) is
+/// likewise from this device's own calibration register (`cal_strip1` in
+/// the info-report readback, decoded per `OpenRGB`'s
+/// `DecodeCalibrationBuffer`) — not the naive `RGBToBGRColor`-packed order
+/// the earlier (non-working) effect-based attempt used for it. Verified by
+/// sending pure red and observing pure red. `IO Cover`/`Chipset Accent`'s
+/// `PktEffect` color field uses that same `RGBToBGRColor` packing
+/// (`[b, g, r]` at offsets 14-16) — confirmed correct for *these* two zones
+/// specifically by observing the exact colors sent.
 ///
 /// # A real behavioral hazard hit while reverse-engineering this
 ///
@@ -414,31 +430,35 @@ const GIGABYTE_REPORT_ID: u8 = 0xcc;
 /// did, intending to silence a strobing default effect before setting a
 /// static color) disables the built-in effect renderer everywhere at
 /// once — including for the zones the caller never intended to touch — and
-/// visibly turned off lighting across the whole board until a
-/// `0x32`-with-zero (re-enable everything) command was sent. This function's
-/// own disable command only *names* the one header it writes to
-/// (`DISABLE_BUILTIN_BIT_D_LED2`) — but see the caveat below, it's still not
-/// a fully safe operation with respect to other headers' state.
+/// visibly turned off lighting across the whole board (including IO
+/// Cover/Chipset Accent) until a `0x32`-with-zero (re-enable everything)
+/// command was sent to recover. This function's own disable command only
+/// *names* `HDR_D_LED2`'s bit — the fact that this leaves every other
+/// header's bit cleared (i.e. their built-in effect enabled) is
+/// deliberately relied on: it's exactly the state `IO Cover`/`Chipset
+/// Accent`'s effect-based writes below need to render.
 ///
 /// # Known gaps, accepted rather than solved here
 ///
 /// - **Not a read-modify-write.** The disable-bitmask register (command
-///   `0x32`) is written as an *absolute* byte containing only this header's
-///   bit, not merged with the register's actual current value — `HidTransport`
-///   has no read-back capability, so there's nothing to merge with. If some
-///   other header's disable bit was set by something else (concurrent
-///   `colorer` use targeting a different header once one exists, or another
-///   RGB tool), this call incidentally clears it, re-enabling that header's
+///   `0x32`) is written as an *absolute* byte containing only `HDR_D_LED2`'s
+///   bit, not merged with the register's actual current value —
+///   `HidTransport` has no read-back capability, so there's nothing to merge
+///   with. If some other header's disable bit was set by something else
+///   (another RGB tool, concurrent `colorer` use once a 4th zone is added),
+///   this call incidentally clears it too, re-enabling that header's
 ///   built-in effect as a side effect. Low-probability on a single-user
-///   machine running only this tool against only this one header, but a real
-///   gap, not a solved one.
-/// - **Partial-sequence failure has no rollback.** If the disable-builtin
-///   report succeeds but a later report in the sequence (an LED chunk, or
-///   apply) fails on every retry, `set_color_impl` returns an error but the
-///   device is left with this header's built-in effect disabled and no
-///   static color ever applied — i.e. dark, not merely "unchanged" — until a
-///   later successful `set_color` call (or a manual re-enable) fixes it.
-fn gigabyte_fusion2_cpu_strip_report(color: &Rgb) -> Vec<Vec<u8>> {
+///   machine running only this tool, but a real gap, not a solved one.
+/// - **Partial-sequence failure has no rollback.** `set_color_impl` retries
+///   the whole sequence from the start on failure, but writes each report to
+///   the real device as it goes — if the disable-builtin report succeeds and
+///   a later report (an LED chunk, an effect-zone write, or apply) then
+///   fails on every retry, the device is left in a worse state than before
+///   the call: the CPU strip's built-in effect disabled with no static color
+///   ever applied (dark, not merely unchanged), and/or IO Cover/Chipset
+///   Accent showing a stale color from before this call, not the new one —
+///   until a later successful `set_color` call fixes it.
+fn gigabyte_fusion2_static_report(color: &Rgb) -> Vec<Vec<u8>> {
     /// `HDR_D_LED2`'s bit in the built-in-effect-disable bitmask register
     /// (command `0x32`) — see `SetStripBuiltinEffectState`'s `switch(hdr)`.
     const DISABLE_BUILTIN_BIT_D_LED2: u8 = 0x02;
@@ -455,6 +475,14 @@ fn gigabyte_fusion2_cpu_strip_report(color: &Rgb) -> Vec<Vec<u8>> {
     const CHANNEL_OFFSET_G: usize = 0;
     const CHANNEL_OFFSET_B: usize = 2;
 
+    /// `PktEffect`'s zone/LED index for `IO Cover` (`LED10` in `OpenRGB`'s
+    /// `GB_FUSION2_LED_IDX` enum, 0-indexed).
+    const IO_COVER_LED: u8 = 9;
+    /// Same, for `Chipset Accent` (`LED11`).
+    const CHIPSET_ACCENT_LED: u8 = 10;
+    const EFFECT_STATIC: u8 = 0x01;
+    const MAX_BRIGHTNESS: u8 = 0xff;
+
     fn new_report(command: u8) -> [u8; GIGABYTE_REPORT_LEN] {
         let mut report = [0u8; GIGABYTE_REPORT_LEN];
         report[0] = GIGABYTE_REPORT_ID;
@@ -462,8 +490,31 @@ fn gigabyte_fusion2_cpu_strip_report(color: &Rgb) -> Vec<Vec<u8>> {
         report
     }
 
-    let mut reports = Vec::with_capacity(1 + NUM_LEDS.div_ceil(LEDS_PER_PACKET) + 1);
+    /// Builds a `PktEffect`/`EFFECT_STATIC` report for a single-LED effect
+    /// zone. `led < 8` uses header `0x20 + led`; `led` in `8..11` uses
+    /// `0x90 + (led - 8)` — `OpenRGB`'s `PktEffect::Init`.
+    fn effect_static_report(led: u8, color: &Rgb) -> [u8; GIGABYTE_REPORT_LEN] {
+        let header = if led < 8 {
+            0x20 + led
+        } else {
+            0x90 + (led - 8)
+        };
+        let mut report = new_report(header);
+        let zone0: u32 = 1u32 << led;
+        report[2..6].copy_from_slice(&zone0.to_le_bytes());
+        report[11] = EFFECT_STATIC;
+        report[12] = MAX_BRIGHTNESS;
+        report[14] = color.b;
+        report[15] = color.g;
+        report[16] = color.r;
+        report
+    }
 
+    let mut reports = Vec::with_capacity(1 + NUM_LEDS.div_ceil(LEDS_PER_PACKET) + 2 + 1);
+
+    // Disabling only HDR_D_LED2's bit leaves every other header's bit
+    // cleared (enabled) — exactly what IO Cover/Chipset Accent's
+    // effect-based writes below need. See the doc comment above.
     let mut disable_builtin = new_report(0x32);
     disable_builtin[2] = DISABLE_BUILTIN_BIT_D_LED2;
     reports.push(disable_builtin.to_vec());
@@ -488,6 +539,9 @@ fn gigabyte_fusion2_cpu_strip_report(color: &Rgb) -> Vec<Vec<u8>> {
         }
         reports.push(report.to_vec());
     }
+
+    reports.push(effect_static_report(IO_COVER_LED, color).to_vec());
+    reports.push(effect_static_report(CHIPSET_ACCENT_LED, color).to_vec());
 
     let mut apply = new_report(0x28);
     apply[2] = 0xff;
@@ -615,11 +669,12 @@ fn open_real_transport(info: &DeviceInfo) -> Result<Box<dyn HidTransport>, Devic
 
 impl ColorWriter for HidBackend {
     /// Sets `color` on the HID device identified by `id`. `IMPLEMENTED_PROTOCOLS`
-    /// currently has three real entries (Razer Ornata V3, Razer Naga X, Gigabyte
-    /// RGB Fusion 2's CPU strip); every other device returns
-    /// `DeviceError::Unsupported`. The surrounding machinery (revalidation,
-    /// retry, transport abstraction) is fully built and tested so adding
-    /// another real device is a matter of populating that table.
+    /// currently has four real entries (Razer Ornata V3, Razer Naga X, Razer
+    /// Tartarus Pro, Gigabyte RGB Fusion 2's CPU strip/IO Cover/Chipset
+    /// Accent); every other device returns `DeviceError::Unsupported`. The
+    /// surrounding machinery (revalidation, retry, transport abstraction) is
+    /// fully built and tested so adding another real device is a matter of
+    /// populating that table.
     fn set_color(&self, id: &str, color: Rgb) -> Result<(), DeviceError> {
         set_color_impl(
             id,
@@ -1259,16 +1314,17 @@ mod tests {
     }
 
     #[test]
-    fn gigabyte_fusion2_cpu_strip_report_sends_disable_chunks_then_apply() {
+    fn gigabyte_fusion2_static_report_sends_disable_chunks_effect_zones_then_apply() {
         let color = Rgb {
             r: 0xff,
             g: 0x7f,
             b: 0x00,
         };
-        let reports = gigabyte_fusion2_cpu_strip_report(&color);
+        let reports = gigabyte_fusion2_static_report(&color);
 
-        // disable-builtin, 3 LED-write chunks (19+19+10=48), apply
-        assert_eq!(reports.len(), 5);
+        // disable-builtin, 3 CPU-strip LED-write chunks (19+19+10=48), IO
+        // Cover effect, Chipset Accent effect, apply
+        assert_eq!(reports.len(), 7);
         for report in &reports {
             assert_eq!(report.len(), GIGABYTE_REPORT_LEN);
             assert_eq!(report[0], GIGABYTE_REPORT_ID);
@@ -1308,7 +1364,30 @@ mod tests {
             "boffset: second chunk starts after 19 LEDs * 3 bytes"
         );
 
-        let apply = &reports[4];
+        let io_cover = &reports[4];
+        assert_eq!(io_cover[1], 0x91, "header: 0x90 + (led 9 - 8) (IO Cover)");
+        assert_eq!(&io_cover[2..6], &(1u32 << 9).to_le_bytes(), "zone0 bit");
+        assert_eq!(io_cover[11], 0x01, "effect_type: static");
+        assert_eq!(io_cover[12], 0xff, "max_brightness");
+        assert_eq!(
+            &io_cover[14..17],
+            &[color.b, color.g, color.r],
+            "color0: b, g, r (RGBToBGRColor packing, confirmed live for this zone)"
+        );
+
+        let chipset_accent = &reports[5];
+        assert_eq!(
+            chipset_accent[1], 0x92,
+            "header: 0x90 + (led 10 - 8) (Chipset Accent)"
+        );
+        assert_eq!(
+            &chipset_accent[2..6],
+            &(1u32 << 10).to_le_bytes(),
+            "zone0 bit"
+        );
+        assert_eq!(&chipset_accent[14..17], &[color.b, color.g, color.r]);
+
+        let apply = &reports[6];
         assert_eq!(&apply[1..4], &[0x28, 0xff, 0x07]);
     }
 

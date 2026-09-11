@@ -19,6 +19,7 @@ KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct
 # Razer Tartarus Pro (1532:0244), interface 2
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0244", ATTRS{bInterfaceNumber}=="02", TAG+="uaccess"
 # Gigabyte RGB Fusion 2 onboard controller (048d:5711), interface 1 — CPU
-# ARGB strip only, see gigabyte_fusion2_cpu_strip_report's doc comment for
-# the board-model scope caveat.
+# strip, IO Cover, and Chipset Accent zones only, see
+# gigabyte_fusion2_static_report's doc comment for the board-model scope
+# caveat.
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="048d", ATTRS{idProduct}=="5711", ATTRS{bInterfaceNumber}=="01", TAG+="uaccess"
