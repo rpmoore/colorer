@@ -465,6 +465,34 @@ const GIGABYTE_REPORT_ID: u8 = 0xcc;
 /// it's exactly the state `IO Cover`/`Chipset Accent`'s effect-based writes
 /// below need to render.
 ///
+/// # Fresh power-on state: color writes accepted but silently ignored
+///
+/// Discovered a day after this function first shipped and worked: after a
+/// full system power cycle, every write in this function still returned
+/// `Ok` (`hidapi`/`HIDIOCSFEATURE` never errors), but **no color visibly
+/// changed at all** — not even briefly — leaving the board on its factory
+/// default (a rotating rainbow effect on every zone, including the two
+/// simple-effect ones). Neither an `EnableLampArray(false)` alone nor even
+/// re-sending the info-identify read (`0x60`) fixed it. What did: replaying
+/// `OpenRGB`'s full controller constructor sequence — `EnableLampArray`
+/// (gated there on a freshly-read `support_cmd_flag` bit, sent
+/// unconditionally here since this board's is known to always set it),
+/// `ResetController` (zero every effect-zone register `0x20..=0x27` and
+/// `0x90..=0x92`, then apply), `EnableBeat(false)` — immediately before the
+/// existing disable-builtin/color-write sequence. This is a one-time
+/// per-power-cycle requirement real client software satisfies once, at
+/// driver-attach time; `colorer` has no equivalent lifecycle hook (it's a
+/// stateless one-shot CLI, not a resident daemon or driver), so this
+/// function replays the whole sequence on *every* call rather than trying
+/// to detect whether a previous invocation already did it. Confirmed
+/// harmless to repeat on an already-initialized device (this session's
+/// device was already initialized when this fix was verified, and repeating
+/// it did not disturb the immediately-following color write). The
+/// mechanism by which this actually unlocks color commands — what in
+/// firmware distinguishes "accepted the write" from "will render it" — was
+/// not root-caused beyond "matches what a real client always does first";
+/// treat that gap as real, not resolved.
+///
 /// # Known gaps, accepted rather than solved here
 ///
 /// - **Not a read-modify-write.** The disable-bitmask register (command
@@ -484,7 +512,11 @@ const GIGABYTE_REPORT_ID: u8 = 0xcc;
 ///   the call: one or both Gen2 strips' built-in effect disabled with no
 ///   static color ever applied (dark, not merely unchanged), and/or IO
 ///   Cover/Chipset Accent showing a stale color from before this call, not
-///   the new one — until a later successful `set_color` call fixes it.
+///   the new one — until a later successful `set_color` call fixes it. The
+///   fresh-power-on init sequence above adds more of these intermediate
+///   states (e.g. every zone reset to off partway through, before the color
+///   writes that follow it in the same sequence run) that a failed retry
+///   could strand the device in.
 fn gigabyte_fusion2_static_report(color: &Rgb) -> Vec<Vec<u8>> {
     /// `HDR_D_LED1`'s bit in the built-in-effect-disable bitmask register
     /// (command `0x32`) — `SetStripBuiltinEffectState`'s `switch(hdr)` has
@@ -574,12 +606,56 @@ fn gigabyte_fusion2_static_report(color: &Rgb) -> Vec<Vec<u8>> {
         report
     }
 
+    fn apply_report() -> [u8; GIGABYTE_REPORT_LEN] {
+        let mut report = new_report(0x28);
+        report[2] = 0xff;
+        report[3] = 0x07;
+        report
+    }
+
+    /// One-time-per-power-cycle chip initialization, unconditionally
+    /// replayed on every call since `colorer` is a stateless one-shot CLI
+    /// with no way to know whether a previous invocation already did this —
+    /// see the function's doc comment ("Fresh power-on state") for why this
+    /// is needed and why it's safe to repeat. Mirrors `OpenRGB`'s
+    /// constructor: `EnableLampArray(false)` (unconditional here rather
+    /// than gated on a freshly-read `support_cmd_flag`, since this board's
+    /// is known to always set that bit), `ResetController` (zero every
+    /// effect-zone register — `0x20..=0x27` for zones/LEDs 0-7, and, for
+    /// this chip/`product_id 0x5711`, `0x90..=0x92` for zones 8-10 too —
+    /// then apply), `EnableBeat(false)`.
+    fn fresh_power_on_init_reports() -> Vec<Vec<u8>> {
+        const RESET_REGISTERS_LOW: std::ops::RangeInclusive<u8> = 0x20..=0x27;
+        const RESET_REGISTERS_HIGH: std::ops::RangeInclusive<u8> = 0x90..=0x92;
+
+        let mut reports = Vec::with_capacity(
+            1 // EnableLampArray(false)
+                + RESET_REGISTERS_LOW.clone().count()
+                + RESET_REGISTERS_HIGH.clone().count()
+                + 1 // reset apply
+                + 1, // EnableBeat(false)
+        );
+
+        reports.push(new_report(0x48).to_vec());
+        for reg in RESET_REGISTERS_LOW.chain(RESET_REGISTERS_HIGH) {
+            reports.push(new_report(reg).to_vec());
+        }
+        reports.push(apply_report().to_vec());
+        reports.push(new_report(0x31).to_vec());
+
+        reports
+    }
+
+    let init_reports = fresh_power_on_init_reports();
     let mut reports = Vec::with_capacity(
-        1 + CASE_FAN_NUM_LEDS.div_ceil(LEDS_PER_PACKET)
+        init_reports.len()
+            + 1 // disable_builtin
+            + CASE_FAN_NUM_LEDS.div_ceil(LEDS_PER_PACKET)
             + CPU_STRIP_NUM_LEDS.div_ceil(LEDS_PER_PACKET)
             + 2
-            + 1,
+            + 1, // final apply
     );
+    reports.extend(init_reports);
 
     // Disabling both Gen2 headers' bits leaves every other header's bit
     // cleared (enabled) — exactly what IO Cover/Chipset Accent's
@@ -602,10 +678,7 @@ fn gigabyte_fusion2_static_report(color: &Rgb) -> Vec<Vec<u8>> {
     reports.push(effect_static_report(IO_COVER_LED, color).to_vec());
     reports.push(effect_static_report(CHIPSET_ACCENT_LED, color).to_vec());
 
-    let mut apply = new_report(0x28);
-    apply[2] = 0xff;
-    apply[3] = 0x07;
-    reports.push(apply.to_vec());
+    reports.push(apply_report().to_vec());
 
     reports
 }
@@ -1373,7 +1446,7 @@ mod tests {
     }
 
     #[test]
-    fn gigabyte_fusion2_static_report_sends_disable_both_strips_effect_zones_then_apply() {
+    fn gigabyte_fusion2_static_report_sends_init_then_disable_chunks_effect_zones_then_apply() {
         let color = Rgb {
             r: 0xff,
             g: 0x7f,
@@ -1381,28 +1454,53 @@ mod tests {
         };
         let reports = gigabyte_fusion2_static_report(&color);
 
+        // EnableLampArray(false), 8 reset registers (0x20-0x27), 3 reset
+        // registers (0x90-0x92), reset apply, EnableBeat(false),
         // disable-builtin, 2 case-fan chunks (19+9=28), 3 CPU-strip chunks
         // (19+19+10=48), IO Cover effect, Chipset Accent effect, apply
-        assert_eq!(reports.len(), 9);
+        assert_eq!(reports.len(), 1 + 8 + 3 + 1 + 1 + 1 + 2 + 3 + 2 + 1);
         for report in &reports {
             assert_eq!(report.len(), GIGABYTE_REPORT_LEN);
             assert_eq!(report[0], GIGABYTE_REPORT_ID);
         }
 
-        let disable = &reports[0];
+        let enable_lamp_array = &reports[0];
+        assert_eq!(&enable_lamp_array[1..3], &[0x48, 0x00]);
+
+        let reset_regs: Vec<u8> = reports[1..12].iter().map(|r| r[1]).collect();
+        assert_eq!(
+            reset_regs,
+            (0x20u8..=0x27).chain(0x90u8..=0x92).collect::<Vec<u8>>(),
+            "every effect-zone register gets zeroed, low then high range"
+        );
+        for reset_reg_report in &reports[1..12] {
+            assert_eq!(
+                &reset_reg_report[2..4],
+                &[0, 0],
+                "reset writes carry no argument bytes, just the register"
+            );
+        }
+
+        let reset_apply = &reports[12];
+        assert_eq!(&reset_apply[1..4], &[0x28, 0xff, 0x07]);
+
+        let enable_beat = &reports[13];
+        assert_eq!(&enable_beat[1..3], &[0x31, 0x00]);
+
+        let disable = &reports[14];
         assert_eq!(
             &disable[1..3],
             &[0x32, 0x01 | 0x02],
             "disable built-in effect for both Gen2 headers: HDR_D_LED1 and HDR_D_LED2's bits"
         );
 
-        let fan_chunk_sizes: Vec<u8> = reports[1..3].iter().map(|r| r[4]).collect();
+        let fan_chunk_sizes: Vec<u8> = reports[15..17].iter().map(|r| r[4]).collect();
         assert_eq!(
             fan_chunk_sizes,
             vec![19 * 3, 9 * 3],
             "28 case-fan LEDs chunked at 19 per packet"
         );
-        let first_fan_chunk = &reports[1];
+        let first_fan_chunk = &reports[15];
         assert_eq!(first_fan_chunk[1], 0x58, "header: HDR_D_LED1_ARGB");
         assert_eq!(&first_fan_chunk[2..4], &[0, 0], "boffset: starts at 0");
         assert_eq!(
@@ -1411,27 +1509,27 @@ mod tests {
             "first LED's 3 bytes in this board's calibrated GRB order"
         );
 
-        let cpu_chunk_sizes: Vec<u8> = reports[3..6].iter().map(|r| r[4]).collect();
+        let cpu_chunk_sizes: Vec<u8> = reports[17..20].iter().map(|r| r[4]).collect();
         assert_eq!(
             cpu_chunk_sizes,
             vec![19 * 3, 19 * 3, 10 * 3],
             "48 CPU-strip LEDs chunked at 19 per packet"
         );
-        let first_cpu_chunk = &reports[3];
+        let first_cpu_chunk = &reports[17];
         assert_eq!(first_cpu_chunk[1], 0x59, "header: HDR_D_LED2_ARGB");
         assert_eq!(
             &first_cpu_chunk[2..4],
             &[0, 0],
             "boffset: first chunk starts at 0"
         );
-        let second_cpu_chunk = &reports[4];
+        let second_cpu_chunk = &reports[18];
         assert_eq!(
             &second_cpu_chunk[2..4],
             &(19u16 * 3).to_le_bytes(),
             "boffset: second chunk starts after 19 LEDs * 3 bytes"
         );
 
-        let io_cover = &reports[6];
+        let io_cover = &reports[20];
         assert_eq!(io_cover[1], 0x91, "header: 0x90 + (led 9 - 8) (IO Cover)");
         assert_eq!(&io_cover[2..6], &(1u32 << 9).to_le_bytes(), "zone0 bit");
         assert_eq!(io_cover[11], 0x01, "effect_type: static");
@@ -1442,7 +1540,7 @@ mod tests {
             "color0: b, g, r (RGBToBGRColor packing, confirmed live for this zone)"
         );
 
-        let chipset_accent = &reports[7];
+        let chipset_accent = &reports[21];
         assert_eq!(
             chipset_accent[1], 0x92,
             "header: 0x90 + (led 10 - 8) (Chipset Accent)"
@@ -1454,7 +1552,7 @@ mod tests {
         );
         assert_eq!(&chipset_accent[14..17], &[color.b, color.g, color.r]);
 
-        let apply = &reports[8];
+        let apply = &reports[22];
         assert_eq!(&apply[1..4], &[0x28, 0xff, 0x07]);
     }
 

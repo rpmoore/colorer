@@ -38,8 +38,11 @@ Parses `<color>` (`RRGGBB` or `#RRGGBB` hex) and writes it via whichever backend
     already covered by an unrelated system Razer rule.
   - Razer Tartarus Pro (`1532:0244`, interface 2) — same struct shape as the Ornata V3
     (`openrazer/openrazer` dispatches both through the same `case` block); confirmed live.
-  - Gigabyte RGB Fusion 2 (`048d:5711`, interface 1) — a 9-report sequence covering 4 of this
-    board's 6 zones: the case-fan ARGB header and the CPU-area ARGB strip (both Gen2
+  - Gigabyte RGB Fusion 2 (`048d:5711`, interface 1) — a 23-report sequence covering 4 of this
+    board's 6 zones: a fresh-power-on chip-init sequence (`EnableLampArray(false)`, reset every
+    effect-zone register, `EnableBeat(false)` — 14 reports, replayed on *every* call since a
+    fresh boot leaves color writes silently ignored and this CLI has no way to detect that from a
+    prior invocation), then the case-fan ARGB header and the CPU-area ARGB strip (both Gen2
     addressable/Direct mode: disable built-in effect for both, then chunked LED-color writes for
     each), plus the motherboard-logo "IO Cover" and "Chipset Accent" LEDs (the simple fixed-color
     "effect" command), then one shared apply. Reverse-engineered from `OpenRGB`'s driver source
