@@ -28,9 +28,14 @@ Parses `<color>` (`RRGGBB` or `#RRGGBB` hex) and writes it via whichever backend
 (`hid-`/`sysfs-`) matches.
 
 - **HID**: fully built (revalidation, retry, Output/Feature transport abstraction, multi-report
-  sequences). Two real, hardware-verified protocol entries:
+  sequences). Three real, hardware-verified protocol entries:
   - Razer Ornata V3 (`1532:02a1`, interface 2) — a single Feature report, reverse-engineered from
     `openrazer/openrazer`'s driver source and confirmed live against a physical keyboard.
+  - Razer Naga X (`1532:0096`, interface 3) — two Feature reports (scroll wheel zone, side
+    underglow zone), sharing the Ornata V3's report-struct builder and framing quirk.
+    Reverse-engineered from `openrazer/openrazer` and confirmed live. Needed the real udev rule
+    installed (see Permissions below) — unlike the Ornata V3, this device's `hidraw` nodes weren't
+    already covered by an unrelated system Razer rule.
   - Gigabyte RGB Fusion 2's CPU-area ARGB strip (`048d:5711`, interface 1) — a 5-report Gen2
     addressable-strip sequence (disable built-in effect, 3 chunked LED-color writes, apply),
     reverse-engineered from `OpenRGB`'s driver source and confirmed live. **Scoped to one header
@@ -38,7 +43,7 @@ Parses `<color>` (`RRGGBB` or `#RRGGBB` hex) and writes it via whichever backend
     chipset/IO-cover accent LEDs) are untouched by `set` on this device's id.
 
   Every other HID device still returns `Unsupported`. See `docs/knowledge/device/set-color-hid.md`
-  for both protocols' details, an empirically-discovered Razer framing gotcha (hidapi needs an
+  for all three protocols' details, an empirically-discovered Razer framing gotcha (hidapi needs an
   explicit report-ID prefix byte even for unnumbered reports), and a Gigabyte behavioral hazard
   (a mis-scoped "disable built-in effect" command briefly turned off all onboard lighting during
   reverse-engineering).
@@ -51,8 +56,13 @@ Parses `<color>` (`RRGGBB` or `#RRGGBB` hex) and writes it via whichever backend
 
 ## Permissions
 
-`packaging/udev/71-colorer.rules` grants unprivileged `hidraw` access via `uaccess` tagging (from
-section-05). The equivalent sysfs-attribute rule (section-06) is **not yet added** — it needs a
+`packaging/udev/71-colorer.rules` grants unprivileged `hidraw` access via `uaccess` tagging, one
+line per real device in `IMPLEMENTED_PROTOCOLS` (Ornata V3, Naga X, Gigabyte). Install it for real
+(`sudo cp` into `/etc/udev/rules.d/`, then `sudo udevadm control --reload-rules && sudo udevadm
+trigger`) — a live `udevadm trigger` alone or an unplug/replug is not equivalent to the rule
+actually being installed, and was not sufficient on the dev machine for the Naga X even after the
+rule file existed in the repo but before it was copied into place. The equivalent sysfs-attribute
+rule (section-06) is **not yet added** — it needs a
 concrete target device's `KERNEL==` name and attribute list, deferred per that section's own
 "don't fabricate a target device" instruction. Until a real sysfs RGB device is identified and
 that rule is written, sysfs `set` will fail with `PermissionDenied` outside a root shell on any
@@ -67,8 +77,8 @@ real `MultiColor`/`VendorColor` device that does show up.
 
 ## Next steps (open, not blocking)
 
-1. Reverse-engineer more real RGB-capable HID devices (e.g. the Razer Naga X / Tartarus Pro also
-   present on the dev machine) to add further `IMPLEMENTED_PROTOCOLS` rows in `src/device/hid.rs`.
+1. Reverse-engineer more real RGB-capable HID devices (e.g. the Razer Tartarus Pro also present on
+   the dev machine) to add further `IMPLEMENTED_PROTOCOLS` rows in `src/device/hid.rs`.
 2. Extend Gigabyte support to the board's other 5 zones (`LED_C`, `IO Cover`, `Chipset Accent`,
    and the other two Gen2 ARGB strips) — needs each one independently confirmed live, plus a real
    read-back capability (`HidTransport` is currently write-only) if strip length/calibration

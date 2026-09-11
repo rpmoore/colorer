@@ -1,11 +1,17 @@
-# colorer udev rule — grants the logged-in seat session access to one
-# specific HID device via the modern `uaccess` tag (same mechanism OpenRGB
-# uses), so `colorer set` doesn't need sudo/root.
+# colorer udev rule — grants the logged-in seat session access to each real,
+# hardware-verified HID target device (via the modern `uaccess` tag, same
+# mechanism OpenRGB uses), so `colorer set` doesn't need sudo/root.
 #
-# PLACEHOLDER: no real target device has been identified/reverse-engineered
-# yet (see docs/plans/sections/section-05-set-hid.md's precondition). This
-# rule intentionally matches nothing useful until <target-vid>/<target-pid>
-# below are replaced with a real device's idVendor/idProduct — do not widen
-# this to a bare `KERNEL=="hidraw*"` match, which would grant access to every
-# HID device on the system (other keyboards, security keys, etc.).
-KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="<target-vid>", ATTRS{idProduct}=="<target-pid>", TAG+="uaccess"
+# One line per confirmed device (see src/device/hid.rs's IMPLEMENTED_PROTOCOLS
+# and its doc comment for how each was verified) — deliberately not a bare
+# `KERNEL=="hidraw*"` match, which would grant access to every HID device on
+# the system (other keyboards, security keys, etc.).
+#
+# Razer Ornata V3 (1532:02a1)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="02a1", TAG+="uaccess"
+# Razer Naga X (1532:0096)
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0096", TAG+="uaccess"
+# Gigabyte RGB Fusion 2 onboard controller (048d:5711) — CPU ARGB strip only,
+# see gigabyte_fusion2_cpu_strip_report's doc comment for the board-model
+# scope caveat.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="048d", ATTRS{idProduct}=="5711", TAG+="uaccess"

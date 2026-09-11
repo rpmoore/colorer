@@ -5,12 +5,19 @@ default on Linux. Installing this rule once grants the logged-in seat
 session access, so `set` never needs `sudo`. `list`/`show` (discovery) never
 need this — they don't open a device handle.
 
-**Status:** `71-colorer.rules` is a placeholder. No real target device has
-been identified/reverse-engineered yet (see
-`docs/plans/sections/section-05-set-hid.md`), so `<target-vid>`/`<target-pid>`
-in the rule file are not filled in, and `colorer set` currently returns
-`Unsupported` for every device regardless of whether this rule is installed.
-Fill in the real `idVendor`/`idProduct` once a target device is chosen.
+**Status:** `71-colorer.rules` covers the real, hardware-verified devices in
+`src/device/hid.rs`'s `IMPLEMENTED_PROTOCOLS`: Razer Ornata V3 (`1532:02a1`),
+Razer Naga X (`1532:0096`), and the Gigabyte RGB Fusion 2 onboard controller
+(`048d:5711`, CPU ARGB strip only — see `gigabyte_fusion2_cpu_strip_report`'s
+doc comment for that device's scope caveat). Add a new line, mirroring the
+existing ones, when a further device is reverse-engineered and added to that
+table.
+
+Note: on at least one dev machine, the Naga X's `hidraw` nodes did **not**
+pick up `uaccess` from this rule via a live `udevadm trigger` alone (nor from
+unplug/replug) — a full `udevadm control --reload-rules && udevadm trigger`
+after the rule file was actually in place was what worked. If a replug alone
+doesn't grant access, re-run the reload+trigger step below.
 
 ## Install steps
 

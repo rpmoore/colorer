@@ -1,7 +1,7 @@
 ---
 type: concept
 title: HID Set-Color Path
-description: "`HidBackend::set_color` (via `ColorWriter`) has two real, hardware-verified `IMPLEMENTED_PROTOCOLS` entries (Razer Ornata V3; Gigabyte RGB Fusion 2's CPU ARGB strip); every other device still returns `Unsupported`."
+description: "`HidBackend::set_color` (via `ColorWriter`) has three real, hardware-verified `IMPLEMENTED_PROTOCOLS` entries (Razer Ornata V3; Razer Naga X; Gigabyte RGB Fusion 2's CPU ARGB strip); every other device still returns `Unsupported`."
 resource: colorer/device
 tags: [device, hid, testability, razer, gigabyte]
 ---
@@ -15,6 +15,8 @@ tags: [device, hid, testability, razer, gigabyte]
 `&[(u16 vendor_id, u16 product_id, i32 interface_number, ReportKind, ReportBuilder)]`. Keyed by vendor/product **and interface number**, not vendor/product alone: a single physical device like the Ornata V3 enumerates as several `DeviceInfo` rows (one per HID interface — see `hid-interface-enumeration.md`) sharing one vendor/product id, but only one specific interface accepts a given command protocol. Being in `vendors.rs`'s known-RGB-vendor allowlist (used by `list`) does NOT imply an entry here — `list` support and `set` support are independent gates; `implemented_protocol()` is the only place that decides the latter.
 
 **Razer Ornata V3** (`1532:02a1`, interface 2, `hid-0454c261` on the dev machine): added and verified live against physical hardware. Protocol confirmed against `openrazer/openrazer`'s `razerkbd_driver.c`/`razerchromacommon.c` source (not guessed): `USB_DEVICE_ID_RAZER_ORNATA_V3` dispatches `matrix_effect_static` to `razer_chroma_extended_matrix_effect_static(VARSTORE, BACKLIGHT_LED, rgb)` with `transaction_id = 0x1F`, `report_index = response_index = 0x02` (matches this device's `interface_number`).
+
+**Razer Naga X** (`1532:0096`, interface 3, `hid-a40f6985` on the dev machine): added and verified live. Confirmed against `openrazer/openrazer`'s `razermouse_driver.c`: `USB_DEVICE_ID_RAZER_NAGA_X` in `matrix_effect_static_common`'s dispatch also routes to `razer_chroma_extended_matrix_effect_static` (same `transaction_id = 0x1F`), so `razer_naga_x_static_report` shares `razer_chroma_extended_matrix_effect_static_struct` — the same 90-byte struct builder and `0x00`-prefix framing quirk — with the Ornata V3, factored out once a second real user of that shape existed. This mouse has two independent zones (`SCROLL_WHEEL_LED`, `LEFT_SIDE_LED`; it has no logo/backlight zone), both set to the same color in one `set_color` call since this CLI has no per-zone addressing — two reports sent per call, one per zone. Permission note: on the dev machine, this device's `hidraw` nodes did not pick up `uaccess` automatically the way the Ornata V3's did (unrelated system Razer udev rules apparently don't cover every product id, or don't grant `uaccess` at all) — needed `packaging/udev/71-colorer.rules` installed for real (`udevadm control --reload-rules && udevadm trigger`, not just a live `trigger` or a replug) before `set` could open the device.
 
 **Gigabyte RGB Fusion 2 onboard controller** (`048d:5711`, interface 1, `hid-0854c8ad` on the dev machine): added and verified live. See "Gigabyte RGB Fusion 2: Gen2 addressable strip, not a simple effect command" below for the full protocol and its scope caveats — this one only drives a single header on a single motherboard model, unlike Razer's whole-device static color.
 

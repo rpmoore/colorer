@@ -145,6 +145,14 @@ enum ReportKind {
 /// dispatches to `razer_chroma_extended_matrix_effect_static` with
 /// `transaction_id = 0x1F`) — see `razer_ornata_v3_static_report`.
 ///
+/// Razer Naga X (`1532:0096`, interface 3): confirmed against
+/// `openrazer/openrazer`'s `razermouse_driver.c`
+/// (`USB_DEVICE_ID_RAZER_NAGA_X` in `matrix_effect_static_common`'s dispatch
+/// also routes to `razer_chroma_extended_matrix_effect_static`, same
+/// `transaction_id = 0x1F`) — see `razer_naga_x_static_report`. Sets both of
+/// this mouse's zones (scroll wheel, side underglow) since this CLI has no
+/// per-zone addressing.
+///
 /// Gigabyte RGB Fusion 2 onboard controller (`048d:5711`, an ITE IT5711 chip,
 /// interface 1) — specifically its CPU-area ARGB strip header only, on one
 /// specific motherboard model: confirmed against `OpenRGB`'s
@@ -162,6 +170,13 @@ const IMPLEMENTED_PROTOCOLS: &[(u16, u16, i32, ReportKind, ReportBuilder)] = &[
         2,
         ReportKind::Feature,
         razer_ornata_v3_static_report,
+    ),
+    (
+        0x1532,
+        0x0096,
+        3,
+        ReportKind::Feature,
+        razer_naga_x_static_report,
     ),
     (
         0x048d,
@@ -201,17 +216,24 @@ fn razer_crc(report: &[u8; RAZER_REPORT_LEN]) -> u8 {
 }
 
 /// Builds the 90-byte Razer "Chroma" `razer_report` struct for
-/// SET_LED_MATRIX_EFFECT / static-color, as sent for the Ornata V3 and the
-/// other devices sharing its `transaction_id = 0x1F` protocol variant in
-/// `razerkbd_driver.c`'s `matrix_effect_static` dispatch. Command class
-/// `0x0F`/id `0x02`, targeting `VARSTORE`/`BACKLIGHT_LED`, effect `STATIC`
-/// (`0x01`), with `arguments[5] = 0x01` (present in every observed capture
-/// but otherwise unexplained by upstream) followed by the RGB bytes. Pure —
-/// no framing — see `razer_ornata_v3_static_report` for the actual
-/// `ReportBuilder` sent over the wire.
-fn razer_ornata_v3_static_struct(color: &Rgb) -> [u8; RAZER_REPORT_LEN] {
+/// SET_LED_MATRIX_EFFECT / static-color: command class `0x0F`/id `0x02`,
+/// targeting `VARSTORE`/the given `led_id`, effect `STATIC` (`0x01`), with
+/// `arguments[5] = 0x01` (present in every observed capture but otherwise
+/// unexplained by upstream) followed by the RGB bytes. Pure — no framing —
+/// see e.g. `razer_ornata_v3_static_report` for an actual `ReportBuilder`
+/// sent over the wire.
+///
+/// Shared by every device/zone using this exact command shape —
+/// `razerkbd_driver.c`'s `matrix_effect_static` dispatch (Ornata V3,
+/// `led_id = BACKLIGHT_LED`) and `razermouse_driver.c`'s per-zone
+/// `matrix_effect_static_common` dispatch (Naga X, `led_id` =
+/// `SCROLL_WHEEL_LED`/`LEFT_SIDE_LED`) both route here with the same
+/// `transaction_id = 0x1F` — only `led_id` differs.
+fn razer_chroma_extended_matrix_effect_static_struct(
+    led_id: u8,
+    color: &Rgb,
+) -> [u8; RAZER_REPORT_LEN] {
     const VARSTORE: u8 = 0x01;
-    const BACKLIGHT_LED: u8 = 0x05;
     const STATIC_EFFECT: u8 = 0x01;
     const TRANSACTION_ID: u8 = 0x1f;
     const COMMAND_CLASS: u8 = 0x0f;
@@ -224,7 +246,7 @@ fn razer_ornata_v3_static_struct(color: &Rgb) -> [u8; RAZER_REPORT_LEN] {
     report[6] = COMMAND_CLASS;
     report[7] = COMMAND_ID;
     report[8] = VARSTORE;
-    report[9] = BACKLIGHT_LED;
+    report[9] = led_id;
     report[10] = STATIC_EFFECT;
     report[13] = 0x01;
     report[14] = color.r;
@@ -232,6 +254,14 @@ fn razer_ornata_v3_static_struct(color: &Rgb) -> [u8; RAZER_REPORT_LEN] {
     report[16] = color.b;
     report[88] = razer_crc(&report);
     report
+}
+
+/// `razer_chroma_extended_matrix_effect_static_struct` targeting the Ornata
+/// V3's `BACKLIGHT_LED` zone (the keyboard's whole backlight — its only
+/// zone this protocol addresses).
+fn razer_ornata_v3_static_struct(color: &Rgb) -> [u8; RAZER_REPORT_LEN] {
+    const BACKLIGHT_LED: u8 = 0x05;
+    razer_chroma_extended_matrix_effect_static_struct(BACKLIGHT_LED, color)
 }
 
 /// The actual `ReportBuilder` for the Ornata V3, sent as a Feature report
@@ -249,11 +279,47 @@ fn razer_ornata_v3_static_struct(color: &Rgb) -> [u8; RAZER_REPORT_LEN] {
 /// `usb_control_msg` rather than going through `hidraw`'s Feature-report
 /// ioctls.
 fn razer_ornata_v3_static_report(color: &Rgb) -> Vec<Vec<u8>> {
-    let body = razer_ornata_v3_static_struct(color);
+    vec![razer_report_wire_bytes(&razer_ornata_v3_static_struct(
+        color,
+    ))]
+}
+
+/// Prefixes a 90-byte `razer_report` struct with the empirically-required
+/// `0x00` HID report-ID byte — see `razer_ornata_v3_static_report`'s doc
+/// comment for why. Shared by every Razer Chroma device/zone report built
+/// on this struct.
+fn razer_report_wire_bytes(body: &[u8; RAZER_REPORT_LEN]) -> Vec<u8> {
     let mut report = Vec::with_capacity(RAZER_REPORT_LEN + 1);
     report.push(0x00);
-    report.extend_from_slice(&body);
-    vec![report]
+    report.extend_from_slice(body);
+    report
+}
+
+/// The `ReportBuilder` for the Razer Naga X: two independent zones, both set
+/// to `color` in one `set_color` call since this CLI has no per-zone
+/// addressing — `SCROLL_WHEEL_LED` (the scroll wheel) and `LEFT_SIDE_LED`
+/// (the underglow strip near the thumb buttons, this mouse's primary visible
+/// RGB — it has no logo/backlight zone, per `razermouse_driver.c`'s Naga X
+/// `CREATE_DEVICE_FILE` block). Both use the same
+/// `razer_chroma_extended_matrix_effect_static_struct` shape as the Ornata
+/// V3; `razermouse_driver.c`'s per-LED `matrix_effect_static_common`
+/// dispatch routes `USB_DEVICE_ID_RAZER_NAGA_X` to
+/// `razer_chroma_extended_matrix_effect_static` with the same
+/// `transaction_id = 0x1F`.
+fn razer_naga_x_static_report(color: &Rgb) -> Vec<Vec<u8>> {
+    const SCROLL_WHEEL_LED: u8 = 0x01;
+    const LEFT_SIDE_LED: u8 = 0x11;
+
+    vec![
+        razer_report_wire_bytes(&razer_chroma_extended_matrix_effect_static_struct(
+            SCROLL_WHEEL_LED,
+            color,
+        )),
+        razer_report_wire_bytes(&razer_chroma_extended_matrix_effect_static_struct(
+            LEFT_SIDE_LED,
+            color,
+        )),
+    ]
 }
 
 /// Length of a Gigabyte RGB Fusion 2 (ITE IT5711-family) control report —
@@ -1060,6 +1126,43 @@ mod tests {
         assert_eq!(wire.len(), RAZER_REPORT_LEN + 1);
         assert_eq!(wire[0], 0x00, "leading HID report-id byte");
         assert_eq!(&wire[1..], &body);
+    }
+
+    #[test]
+    fn razer_naga_x_static_report_sets_scroll_wheel_and_left_side_zones() {
+        // Wire byte indices are the pure struct's index + 1, since byte 0 is
+        // the prepended HID report-id prefix (see
+        // razer_ornata_v3_static_report_prefixes_report_id_byte).
+        let color = Rgb {
+            r: 0x10,
+            g: 0x20,
+            b: 0x30,
+        };
+        let reports = razer_naga_x_static_report(&color);
+
+        assert_eq!(reports.len(), 2, "scroll wheel zone, then left-side zone");
+        for report in &reports {
+            assert_eq!(report.len(), RAZER_REPORT_LEN + 1);
+            assert_eq!(
+                report[0], 0x00,
+                "leading HID report-id byte, same as Ornata V3"
+            );
+            assert_eq!(report[2], 0x1f, "transaction_id");
+            assert_eq!(
+                &report[6..9],
+                &[9, 0x0f, 0x02],
+                "data_size, command_class, command_id"
+            );
+            assert_eq!(report[9], 0x01, "varstore");
+            assert_eq!(report[11], 0x01, "static effect");
+            assert_eq!(&report[15..18], &[color.r, color.g, color.b]);
+        }
+
+        assert_eq!(
+            reports[0][10], 0x01,
+            "scroll wheel: SCROLL_WHEEL_LED led_id"
+        );
+        assert_eq!(reports[1][10], 0x11, "left side: LEFT_SIDE_LED led_id");
     }
 
     #[test]
