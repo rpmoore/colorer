@@ -6,12 +6,16 @@ session access, so `set` never needs `sudo`. `list`/`show` (discovery) never
 need this — they don't open a device handle.
 
 **Status:** `71-colorer.rules` covers the real, hardware-verified devices in
-`src/device/hid.rs`'s `IMPLEMENTED_PROTOCOLS`: Razer Ornata V3 (`1532:02a1`),
-Razer Naga X (`1532:0096`), and the Gigabyte RGB Fusion 2 onboard controller
-(`048d:5711`, CPU ARGB strip only — see `gigabyte_fusion2_cpu_strip_report`'s
-doc comment for that device's scope caveat). Add a new line, mirroring the
-existing ones, when a further device is reverse-engineered and added to that
-table.
+`src/device/hid.rs`'s `IMPLEMENTED_PROTOCOLS`: Razer Ornata V3 (`1532:02a1`,
+interface 2), Razer Naga X (`1532:0096`, interface 3), and the Gigabyte RGB
+Fusion 2 onboard controller (`048d:5711`, interface 1, CPU ARGB strip only —
+see `gigabyte_fusion2_cpu_strip_report`'s doc comment for that device's scope
+caveat). Each line matches `ATTRS{bInterfaceNumber}` too, scoped to the exact
+interface `colorer` writes to — not just `idVendor`/`idProduct`, which would
+grant `uaccess` to every hidraw interface the device exposes (e.g. a
+keyboard's plain input interface alongside its vendor control interface).
+Add a new line, mirroring the existing ones (vendor/product/interface all
+three), when a further device is reverse-engineered and added to that table.
 
 Note: on at least one dev machine, the Naga X's `hidraw` nodes did **not**
 pick up `uaccess` from this rule via a live `udevadm trigger` alone (nor from

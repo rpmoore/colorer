@@ -121,9 +121,10 @@ fn map_hid_error(err: HidError) -> DeviceError {
 type ReportBuilder = fn(&Rgb) -> Vec<Vec<u8>>;
 
 /// Which write path a device's protocol uses — see `HidTransport`'s doc comment.
-// Output is unused by any current IMPLEMENTED_PROTOCOLS entry (the only real
-// device so far, Ornata V3, uses Feature) but is part of the stable contract
-// for a future device whose protocol uses plain interrupt writes instead.
+// Output is unused by any current IMPLEMENTED_PROTOCOLS entry (every real
+// device so far — Ornata V3, Naga X, Gigabyte's CPU strip — uses Feature)
+// but is part of the stable contract for a future device whose protocol
+// uses plain interrupt writes instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReportKind {
     #[allow(dead_code)]
@@ -306,6 +307,13 @@ fn razer_report_wire_bytes(body: &[u8; RAZER_REPORT_LEN]) -> Vec<u8> {
 /// dispatch routes `USB_DEVICE_ID_RAZER_NAGA_X` to
 /// `razer_chroma_extended_matrix_effect_static` with the same
 /// `transaction_id = 0x1F`.
+///
+/// **No rollback on partial-sequence failure**, same class of gap as
+/// `gigabyte_fusion2_cpu_strip_report`'s: `set_color_impl` writes each report
+/// to the real device as it sends them, so if the scroll-wheel report
+/// succeeds but the left-side report then fails on every retry, `set_color`
+/// returns an error while the mouse is left with its two zones showing
+/// different colors — not merely unchanged.
 fn razer_naga_x_static_report(color: &Rgb) -> Vec<Vec<u8>> {
     const SCROLL_WHEEL_LED: u8 = 0x01;
     const LEFT_SIDE_LED: u8 = 0x11;
@@ -583,11 +591,11 @@ fn open_real_transport(info: &DeviceInfo) -> Result<Box<dyn HidTransport>, Devic
 
 impl ColorWriter for HidBackend {
     /// Sets `color` on the HID device identified by `id`. `IMPLEMENTED_PROTOCOLS`
-    /// currently has two real entries (Razer Ornata V3, Gigabyte RGB Fusion 2's
-    /// CPU strip); every other device returns `DeviceError::Unsupported`. The
-    /// surrounding machinery (revalidation, retry, transport abstraction) is
-    /// fully built and tested so adding another real device is a matter of
-    /// populating that table.
+    /// currently has three real entries (Razer Ornata V3, Razer Naga X, Gigabyte
+    /// RGB Fusion 2's CPU strip); every other device returns
+    /// `DeviceError::Unsupported`. The surrounding machinery (revalidation,
+    /// retry, transport abstraction) is fully built and tested so adding
+    /// another real device is a matter of populating that table.
     fn set_color(&self, id: &str, color: Rgb) -> Result<(), DeviceError> {
         set_color_impl(
             id,
@@ -1081,6 +1089,18 @@ mod tests {
         // keyboard boot interface) must not match — only interface 2 speaks
         // this command protocol.
         assert!(implemented_protocol(Some(0x1532), Some(0x02a1), Some(0)).is_none());
+    }
+
+    #[test]
+    fn implemented_protocol_matches_naga_x_only_on_its_specific_interface() {
+        let (kind, _builder) = implemented_protocol(Some(0x1532), Some(0x0096), Some(3))
+            .expect("Naga X interface 3 must resolve to a protocol");
+        assert_eq!(kind, ReportKind::Feature);
+
+        // Same vendor/product but a different interface must not match, and
+        // must not collide with the Ornata V3's entry despite sharing
+        // vendor id 0x1532.
+        assert!(implemented_protocol(Some(0x1532), Some(0x0096), Some(0)).is_none());
     }
 
     #[test]

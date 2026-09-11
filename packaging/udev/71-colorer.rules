@@ -5,13 +5,18 @@
 # One line per confirmed device (see src/device/hid.rs's IMPLEMENTED_PROTOCOLS
 # and its doc comment for how each was verified) — deliberately not a bare
 # `KERNEL=="hidraw*"` match, which would grant access to every HID device on
-# the system (other keyboards, security keys, etc.).
+# the system (other keyboards, security keys, etc.). Each line also matches
+# `ATTRS{bInterfaceNumber}`, scoped to the exact interface `colorer` actually
+# writes to — matching on idVendor/idProduct alone would grant uaccess to
+# every hidraw interface a device exposes (e.g. a keyboard's plain
+# input/boot interface alongside its vendor control interface), not just the
+# one this tool uses.
 #
-# Razer Ornata V3 (1532:02a1)
-KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="02a1", TAG+="uaccess"
-# Razer Naga X (1532:0096)
-KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0096", TAG+="uaccess"
-# Gigabyte RGB Fusion 2 onboard controller (048d:5711) — CPU ARGB strip only,
-# see gigabyte_fusion2_cpu_strip_report's doc comment for the board-model
-# scope caveat.
-KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="048d", ATTRS{idProduct}=="5711", TAG+="uaccess"
+# Razer Ornata V3 (1532:02a1), interface 2
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="02a1", ATTRS{bInterfaceNumber}=="02", TAG+="uaccess"
+# Razer Naga X (1532:0096), interface 3
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1532", ATTRS{idProduct}=="0096", ATTRS{bInterfaceNumber}=="03", TAG+="uaccess"
+# Gigabyte RGB Fusion 2 onboard controller (048d:5711), interface 1 — CPU
+# ARGB strip only, see gigabyte_fusion2_cpu_strip_report's doc comment for
+# the board-model scope caveat.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="048d", ATTRS{idProduct}=="5711", ATTRS{bInterfaceNumber}=="01", TAG+="uaccess"
