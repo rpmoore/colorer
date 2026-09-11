@@ -154,6 +154,12 @@ enum ReportKind {
 /// this mouse's zones (scroll wheel, side underglow) since this CLI has no
 /// per-zone addressing.
 ///
+/// Razer Tartarus Pro (`1532:0244`, interface 2): confirmed against
+/// `openrazer/openrazer`'s `razerkbd_driver.c` —
+/// `USB_DEVICE_ID_RAZER_TARTARUS_PRO` shares the exact same `case` block
+/// (and so `BACKLIGHT_LED`/`transaction_id = 0x1F`) as the Ornata V3 in
+/// `matrix_effect_static`'s dispatch — see `razer_tartarus_pro_static_report`.
+///
 /// Gigabyte RGB Fusion 2 onboard controller (`048d:5711`, an ITE IT5711 chip,
 /// interface 1) — specifically its CPU-area ARGB strip header only, on one
 /// specific motherboard model: confirmed against `OpenRGB`'s
@@ -178,6 +184,13 @@ const IMPLEMENTED_PROTOCOLS: &[(u16, u16, i32, ReportKind, ReportBuilder)] = &[
         3,
         ReportKind::Feature,
         razer_naga_x_static_report,
+    ),
+    (
+        0x1532,
+        0x0244,
+        2,
+        ReportKind::Feature,
+        razer_tartarus_pro_static_report,
     ),
     (
         0x048d,
@@ -280,6 +293,17 @@ fn razer_ornata_v3_static_struct(color: &Rgb) -> [u8; RAZER_REPORT_LEN] {
 /// `usb_control_msg` rather than going through `hidraw`'s Feature-report
 /// ioctls.
 fn razer_ornata_v3_static_report(color: &Rgb) -> Vec<Vec<u8>> {
+    vec![razer_report_wire_bytes(&razer_ornata_v3_static_struct(
+        color,
+    ))]
+}
+
+/// The `ReportBuilder` for the Razer Tartarus Pro: same `BACKLIGHT_LED`
+/// zone, same `transaction_id = 0x1F` group in `razerkbd_driver.c`'s
+/// `matrix_effect_static` dispatch as the Ornata V3
+/// (`USB_DEVICE_ID_RAZER_TARTARUS_PRO` shares that `case` block), so this is
+/// the same struct shape on a different device/interface.
+fn razer_tartarus_pro_static_report(color: &Rgb) -> Vec<Vec<u8>> {
     vec![razer_report_wire_bytes(&razer_ornata_v3_static_struct(
         color,
     ))]
@@ -1104,6 +1128,23 @@ mod tests {
     }
 
     #[test]
+    fn implemented_protocol_matches_tartarus_pro_and_not_ornata_v3_despite_same_interface() {
+        let color = Rgb { r: 1, g: 2, b: 3 };
+        let (kind, builder) = implemented_protocol(Some(0x1532), Some(0x0244), Some(2))
+            .expect("Tartarus Pro interface 2 must resolve to a protocol");
+        assert_eq!(kind, ReportKind::Feature);
+        assert_eq!(
+            builder(&color),
+            razer_tartarus_pro_static_report(&color),
+            "must resolve to the Tartarus Pro's own builder, not the Ornata \
+             V3's, despite both using interface 2 — product_id must \
+             disambiguate them"
+        );
+
+        assert!(implemented_protocol(Some(0x1532), Some(0x0244), Some(0)).is_none());
+    }
+
+    #[test]
     fn razer_ornata_v3_static_struct_matches_known_captures() {
         // Byte layout confirmed against openrazer's
         // razer_chroma_extended_matrix_effect_static doc comment: e.g.
@@ -1183,6 +1224,38 @@ mod tests {
             "scroll wheel: SCROLL_WHEEL_LED led_id"
         );
         assert_eq!(reports[1][10], 0x11, "left side: LEFT_SIDE_LED led_id");
+    }
+
+    #[test]
+    fn razer_tartarus_pro_static_report_matches_ornata_v3_shape_on_backlight_led() {
+        let color = Rgb {
+            r: 0x44,
+            g: 0x55,
+            b: 0x66,
+        };
+        let reports = razer_tartarus_pro_static_report(&color);
+
+        assert_eq!(
+            reports.len(),
+            1,
+            "single-report protocol, same as Ornata V3"
+        );
+        let report = &reports[0];
+        assert_eq!(report.len(), RAZER_REPORT_LEN + 1);
+        assert_eq!(report[0], 0x00, "leading HID report-id byte");
+        assert_eq!(report[2], 0x1f, "transaction_id");
+        assert_eq!(
+            &report[6..9],
+            &[9, 0x0f, 0x02],
+            "data_size, command_class, command_id"
+        );
+        assert_eq!(report[9], 0x01, "varstore");
+        assert_eq!(
+            report[10], 0x05,
+            "BACKLIGHT_LED led_id, same zone as Ornata V3"
+        );
+        assert_eq!(report[11], 0x01, "static effect");
+        assert_eq!(&report[15..18], &[color.r, color.g, color.b]);
     }
 
     #[test]
